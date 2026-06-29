@@ -134,6 +134,7 @@ class AdaptiveSchedulingLoop:
         # -- Compile --------------------------------------------------
         with contextlib.redirect_stdout(io.StringIO()):
             dfg.bingo_compile_conditional_regions()
+            dfg.bingo_transform_dfg_serialize_shared_counter_consumers()
             dfg.bingo_transform_dfg_add_dummy_set_nodes()
             dfg.bingo_transform_dfg_add_dummy_check_nodes()
             dfg.bingo_assign_normal_node_dep_check_info()

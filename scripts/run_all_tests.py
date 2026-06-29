@@ -113,6 +113,7 @@ def run_pattern(name, factory, kwargs, output_dir, emit_sv=False, verbose=True):
     # Build and compile DFG
     dfg = factory(**kwargs)
     dfg.bingo_compile_conditional_regions()
+    dfg.bingo_transform_dfg_serialize_shared_counter_consumers()
     dfg.bingo_transform_dfg_add_dummy_set_nodes()
     dfg.bingo_transform_dfg_add_dummy_check_nodes()
     dfg.bingo_assign_normal_node_dep_check_info()
