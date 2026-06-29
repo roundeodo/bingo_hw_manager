@@ -284,6 +284,9 @@ bingo_dfg.bingo_add_edge(chip2_cluster0_core0_gemm_2, chip3_cluster0_core0_gemm_
 #                 chiplet3
 bingo_dfg.bingo_visualize_dfg("original_dfg.png")
 
+# Serialize producers that share a (consumer_core, producer_core) counter cell
+# across multiple consumers, so each consumer drains exactly its own producers.
+bingo_dfg.bingo_transform_dfg_serialize_shared_counter_consumers()
 # Transform the DFG to add dummy set nodes
 bingo_dfg.bingo_transform_dfg_add_dummy_set_nodes()
 bingo_dfg.bingo_visualize_dfg("dfg_after_add_dummy_dep_set_nodes.png")
