@@ -64,6 +64,9 @@ module bingo_hw_manager_top #(
     // Hence this is a master AXI Lite interface
     input host_axi_lite_addr_t                  task_list_base_addr_i, // The task list base address specified by the host
     input device_axi_lite_data_t                num_task_i,            // The number of tasks specified by the host
+    input host_axi_lite_data_t                  dynamic_task_desc_i,
+    input logic                                 dynamic_task_valid_i,
+    output logic                                dynamic_task_ready_o,
     // Control signals to start the HW Manager
     // The start signals are from the reg gen modules
     input  device_axi_lite_data_t               bingo_hw_manager_start_i,
@@ -450,21 +453,45 @@ module bingo_hw_manager_top #(
     assign cerf_state_o = cerf_state;  // read-back for SW
     logic [NUM_CORES_PER_CLUSTER-1:0] cond_exec_skip;
 
-    // DARTS CERF: per-core conditional skip evaluation.
-    // Only valid when there IS a task being processed (queue not empty).
-    // When cond_exec_en==0 (default), this is always 0 regardless of CERF state.
+    // DARTS CERF: per-core conditional skip evaluation moved to a standalone
+    // module for independent PPA analysis and future extension.
     for (genvar c = 0; c < NUM_CORES_PER_CLUSTER; c++) begin: gen_cerf_skip
-        logic cerf_group_active_for_core;
-        assign cerf_group_active_for_core = cerf_state[waiting_dep_check_task_desc[c].cond_exec_group_id];
-        assign cond_exec_skip[c] = !waiting_dep_check_queue_empty[c] &&
-                                    waiting_dep_check_task_desc[c].cond_exec_en &&
-                                    (waiting_dep_check_task_desc[c].cond_exec_invert ?
-                                        cerf_group_active_for_core : !cerf_group_active_for_core);
+        bingo_hw_manager_cond_exec_filter #(
+            .CerfWidth   (32),
+            .GroupIdWidth(5)
+        ) i_bingo_hw_manager_cond_exec_filter (
+            .task_valid_i         (!waiting_dep_check_queue_empty[c]),
+            .cond_exec_en_i       (waiting_dep_check_task_desc[c].cond_exec_en),
+            .cond_exec_group_id_i (waiting_dep_check_task_desc[c].cond_exec_group_id),
+            .cond_exec_invert_i   (waiting_dep_check_task_desc[c].cond_exec_invert),
+            .cerf_state_i         (cerf_state),
+            .cond_exec_skip_o     (cond_exec_skip[c])
+        );
     end
+
+    // synthesis translate_off
+    // CERF DBG display disabled to avoid per-cycle output slowing simulation.
+    // synthesis translate_on
 
     // PM signals
     ///////////////////////////////////////
     logic [NUM_CORES_PER_CLUSTER-1:0][NUM_CLUSTERS_PER_CHIPLET-1:0] core_status_waiting_task;
+
+    ///////////////////////////////////////
+    // Phase flush: rising edge detection on start signal.
+    // Clears all internal FIFOs and dep_matrix counters between phases.
+    ///////////////////////////////////////
+    logic start_q;
+    logic phase_flush;
+    always_ff @(posedge clk_i or negedge rst_ni) begin
+        if (!rst_ni) begin
+            start_q <= 1'b0;
+        end else begin
+            start_q <= |bingo_hw_manager_start_i;
+        end
+    end
+    assign phase_flush = (|bingo_hw_manager_start_i) & ~start_q;
+
     // --------Finish Type definitions and signal declarations--------------------//
 
     // --------Module initializations---------------------------------------------//
@@ -495,7 +522,7 @@ module bingo_hw_manager_top #(
             .mbox_data_o (task_queue_mbox_data      ),
             .mbox_pop_i  (task_queue_mbox_pop       ),
             .mbox_empty_o(task_queue_mbox_empty     ),
-            .mbox_flush_i('0                        )
+            .mbox_flush_i(phase_flush               )
         );
         // Tie off the unused master interface signals
         assign task_queue_axi_lite_req_o = '0;
@@ -519,6 +546,7 @@ module bingo_hw_manager_top #(
             .task_list_base_addr_i     (task_list_base_addr_i                ),
             .num_task_i                (num_task_i                           ),
             .start_i                   (bingo_hw_manager_start_i             ),
+            .flush_i                   (phase_flush                          ),
             .reset_start_o             (bingo_hw_manager_reset_start_o       ),
             .reset_start_en_o          (bingo_hw_manager_reset_start_en_o    ),
             .task_queue_axi_lite_req_o (task_queue_axi_lite_req_o            ),
@@ -531,14 +559,16 @@ module bingo_hw_manager_top #(
         assign task_queue_axi_lite_resp_o = '0;
     end
     //////////////////////////////////////////////////////////////////////
-    // Task queue → demux (direct connection, no mux needed)
+    // Task queue / dynamic descriptor → demux
     //////////////////////////////////////////////////////////////////////
     host_axi_lite_data_t muxed_task_data;
     logic                muxed_task_valid;
 
-    assign muxed_task_data  = task_queue_mbox_data;
-    assign muxed_task_valid = !task_queue_mbox_empty;
-    assign task_queue_mbox_pop = stream_demux_core_type_inp_ready && !task_queue_mbox_empty;
+    assign muxed_task_data  = dynamic_task_valid_i ? dynamic_task_desc_i : task_queue_mbox_data;
+    assign muxed_task_valid = dynamic_task_valid_i | !task_queue_mbox_empty;
+    assign dynamic_task_ready_o = dynamic_task_valid_i & stream_demux_core_type_inp_ready;
+    assign task_queue_mbox_pop = stream_demux_core_type_inp_ready &&
+                                 !dynamic_task_valid_i && !task_queue_mbox_empty;
 
     // Compose the current task descriptor from the muxed source
     assign cur_task_desc_full = bingo_hw_manager_task_desc_full_t'(muxed_task_data);
@@ -636,7 +666,7 @@ module bingo_hw_manager_top #(
         .mbox_data_o (chiplet_done_queue_mbox_data      ),
         .mbox_pop_i  (chiplet_done_queue_mbox_pop       ),
         .mbox_empty_o(chiplet_done_queue_mbox_empty     ),
-        .mbox_flush_i('0                                )
+        .mbox_flush_i(phase_flush                       )
     );
     assign cur_chiplet_done_queue_task_desc = bingo_hw_manager_task_desc_full_t'(chiplet_done_queue_mbox_data);
     assign chiplet_done_queue_mbox_pop =  stream_arbiter_dep_matrix_set_inp_ready[NUM_CORES_PER_CLUSTER * NUM_CLUSTERS_PER_CHIPLET] && !chiplet_done_queue_mbox_empty;
@@ -670,7 +700,7 @@ module bingo_hw_manager_top #(
             .clk_i       ( clk_i                               ),
             .rst_ni      ( rst_ni                              ),
             .testmode_i  ( 1'b0                                ),
-            .flush_i     ( 1'b0                                ),
+            .flush_i     ( phase_flush                         ),
             .full_o      ( waiting_dep_check_queue_full[core]  ),
             .empty_o     ( waiting_dep_check_queue_empty[core] ),
             .usage_o     ( /*not used*/                        ),
@@ -750,6 +780,7 @@ module bingo_hw_manager_top #(
         ) i_dep_matrix (
             .clk_i             (clk_i                    ),
             .rst_ni            (rst_ni                   ),
+            .flush_i           (phase_flush              ),
             .dep_check_valid_i (dep_check_valid[cluster] ),
             .dep_check_code_i  (dep_check_code[cluster]  ),
             .dep_check_result_o(dep_check_result[cluster]),
@@ -901,7 +932,7 @@ module bingo_hw_manager_top #(
                     .mbox_data_i (ready_queue_data_in[core][cluster]                           ),
                     .mbox_push_i (ready_queue_push[core][cluster]                              ),
                     .mbox_full_o (ready_queue_full[core][cluster]                              ),
-                    .mbox_flush_i(1'b0                                                         )
+                    .mbox_flush_i(phase_flush                                                  )
                 );
                 // Connect to the core_status_waiting_task
                 // This signal indicates whether the core is waiting for a task to be read from the ready queue
@@ -921,7 +952,7 @@ module bingo_hw_manager_top #(
                     .clk_i       ( clk_i                                  ),
                     .rst_ni      ( rst_ni                                 ),
                     .testmode_i  ( 1'b0                                   ),
-                    .flush_i     ( 1'b0                                   ),
+                    .flush_i     ( phase_flush                            ),
                     .full_o      ( ready_queue_full[core][cluster]        ),
                     .empty_o     ( ready_queue_empty[core][cluster]       ),
                     .usage_o     ( /*not used*/                           ),
@@ -960,7 +991,7 @@ module bingo_hw_manager_top #(
                 .clk_i       ( clk_i                                  ),
                 .rst_ni      ( rst_ni                                 ),
                 .testmode_i  ( 1'b0                                   ),
-                .flush_i     ( 1'b0                                   ),
+                .flush_i     ( phase_flush                            ),
                 .full_o      ( checkout_queue_full[core][cluster]     ),
                 .empty_o     ( checkout_queue_empty[core][cluster]    ),
                 .usage_o     ( /*not used*/                           ),
@@ -1046,7 +1077,7 @@ module bingo_hw_manager_top #(
             .mbox_data_o (done_queue_mbox_data      ),
             .mbox_pop_i  (done_queue_mbox_pop       ),
             .mbox_empty_o(done_queue_mbox_empty     ),
-            .mbox_flush_i(1'b0)
+            .mbox_flush_i(phase_flush)
         );
         assign cur_done_queue_info_axi = bingo_hw_manager_done_info_full_t'(done_queue_mbox_data);
         // Pop the mailbox when the target per-(core,cluster) FIFO accepts it
@@ -1082,7 +1113,7 @@ module bingo_hw_manager_top #(
                 .clk_i       ( clk_i                            ),
                 .rst_ni      ( rst_ni                           ),
                 .testmode_i  ( 1'b0                             ),
-                .flush_i     ( 1'b0                             ),
+                .flush_i     ( phase_flush                      ),
                 .full_o      ( done_q_full[core][cluster]       ),
                 .empty_o     ( done_q_empty[core][cluster]      ),
                 .usage_o     ( /*not used*/                     ),
@@ -1272,16 +1303,11 @@ module bingo_hw_manager_top #(
 
     //////////////////////////////////////////////////////////////////////
     // DARTS Tier 1: Conditional Execution Register File (CERF)
+    // Direct pass-through: cerf_state tracks the quad_periph register
+    // value written by the host (cerf_write_data_i). No latching needed
+    // because the register in the caller is already a flip-flop.
     //////////////////////////////////////////////////////////////////////
 
-    bingo_hw_manager_cond_exec_controller #(
-        .NumGroups(32)
-    ) i_cerf (
-        .clk_i            ( clk_i                  ),
-        .rst_ni           ( rst_ni                 ),
-        .cerf_state_o     ( cerf_state             ),
-        .cerf_write_data_i( cerf_write_data_i      ),
-        .cerf_write_en_i  ( cerf_write_en_i        )
-    );
+    assign cerf_state = cerf_write_data_i;
 
 endmodule

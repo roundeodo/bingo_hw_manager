@@ -36,6 +36,8 @@ module bingo_hw_manager_dep_matrix #(
 ) (
     input  logic   clk_i,
     input  logic   rst_ni,
+    // Phase flush: clear all counters to zero on new phase start
+    input  logic   flush_i,
     // Row check interface
     input  logic              [DEP_MATRIX_ROWS-1:0] dep_check_valid_i,
     input  dep_check_code_t   [DEP_MATRIX_ROWS-1:0] dep_check_code_i,
@@ -81,6 +83,12 @@ module bingo_hw_manager_dep_matrix #(
     // Sequential update: apply set increments and check decrements
     always_ff @(posedge clk_i or negedge rst_ni) begin
         if (!rst_ni) begin
+            for (int r = 0; r < DEP_MATRIX_ROWS; r++) begin
+                for (int c = 0; c < DEP_MATRIX_COLS; c++) begin
+                    counter_q[r][c] <= '0;
+                end
+            end
+        end else if (flush_i) begin
             for (int r = 0; r < DEP_MATRIX_ROWS; r++) begin
                 for (int c = 0; c < DEP_MATRIX_COLS; c++) begin
                     counter_q[r][c] <= '0;

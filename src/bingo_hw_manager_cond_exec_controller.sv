@@ -36,10 +36,11 @@ module bingo_hw_manager_cond_exec_controller #(
     // Combinational full-state output
     assign cerf_state_o = cerf_q;
 
-    // Sequential write: latch entire bitmask on write_en
+    // Sequential write: latch entire bitmask on write_en.
+    // DARTS default: all groups active until SW writes a new bitmask.
     always_ff @(posedge clk_i or negedge rst_ni) begin
         if (!rst_ni) begin
-            cerf_q <= '0;
+            cerf_q <= '1;
         end else if (cerf_write_en_i) begin
             cerf_q <= cerf_write_data_i;
         end

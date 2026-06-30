@@ -23,6 +23,7 @@ sources:
   - src/bingo_hw_manager_csr_to_fifo.sv        # CSR to FIFO Interface Module
   # Level 1
   - src/bingo_hw_manager_cond_exec_controller.sv # DARTS: CERF
+  - src/bingo_hw_manager_cond_exec_filter.sv     # DARTS: CERF skip predicate
   - src/bingo_hw_manager_load_monitor.sv         # DARTS: Load Monitor
   - src/bingo_hw_manager_dep_matrix.sv         # Dependency Matrix Module
   - src/bingo_hw_manager_chiplet_dep_set.sv    # Chiplet DependencySetModule (The Master port to send chiplet dep set info to other chiplets)

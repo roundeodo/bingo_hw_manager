@@ -24,6 +24,7 @@ module bingo_hw_manager_task_queue_master #(
     input  addr_t                  task_list_base_addr_i,  // The task list base address specified by the host
     input  logic [CfgBusWidth-1:0] num_task_i,       // The number of tasks specified by the host
     input  logic [CfgBusWidth-1:0] start_i,          // Start signal
+    input  logic                   flush_i,          // Phase flush signal
     output logic [CfgBusWidth-1:0] reset_start_o,    // Reset start signal to zero
     output logic                   reset_start_en_o, // Reset start enable signal
     // AXI Lite Master Interface to get task 
@@ -79,7 +80,7 @@ module bingo_hw_manager_task_queue_master #(
         .clk_i       ( clk_i                ),
         .rst_ni      ( rst_ni               ),
         .testmode_i  ( 1'b0                 ),
-        .flush_i     ( 1'b0                 ),
+        .flush_i     ( flush_i              ),
         .full_o      ( task_queue_full      ),
         .empty_o     ( task_queue_empty_o   ),
         .usage_o     ( /*not used*/         ),

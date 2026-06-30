@@ -9,6 +9,7 @@ module tb_bingo_hw_manager_dep_matrix();
     // clock / reset
     logic clk_i;
     logic rst_ni;
+    logic flush_i;
 
     // DUT signals (match new DUT interface)
     logic [N-1:0]                      dep_check_valid_i;
@@ -31,6 +32,7 @@ module tb_bingo_hw_manager_dep_matrix();
     ) dut (
         .clk_i(clk_i),
         .rst_ni(rst_ni),
+        .flush_i(flush_i),
         .dep_check_valid_i(dep_check_valid_i),
         .dep_check_code_i(dep_check_code_i),
         .dep_check_result_o(dep_check_result_o),
@@ -121,6 +123,7 @@ module tb_bingo_hw_manager_dep_matrix();
         end
         dep_check_valid_i = {N{1'b0}}; // Initialize to all zeros
         dep_set_valid_i   = {N{1'b0}}; // Initialize to all zeros
+        flush_i           = 1'b0;
         col               = '0;        // Initialize to zero
         pattern           = '0;        // Initialize to zero
         expected_row      = '0;        // Initialize to zero
