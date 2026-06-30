@@ -1,6 +1,6 @@
 # Bingo Hardware Task Manager
 
-A hardware task scheduler for heterogeneous multi-core, multi-chiplet SoCs. It accepts a stream of task descriptors with encoded dependency information, resolves inter-task dependencies through a per-cluster dependency matrix, and dispatches ready tasks to execution cores. The dependency matrix has two modes: the default counter-based matrix, and an opt-in **identity-aware tagged scoreboard** (`EnableTaggedDeps`) that makes a consumer wait for *its* producer rather than any signal from a producer core — see **Identity-Aware Dependencies**.
+A hardware task scheduler for heterogeneous multi-core, multi-chiplet SoCs. It accepts a stream of task descriptors with encoded dependency information, resolves inter-task dependencies through a per-cluster dependency matrix, and dispatches ready tasks to execution cores. The dependency matrix is an **identity-aware tagged scoreboard** by default (`EnableTaggedDeps=1`) — a consumer waits for *its* producer rather than any signal from a producer core — with a legacy identity-blind counter mode (`EnableTaggedDeps=0`) still selectable. See **Identity-Aware Dependencies**.
 
 **Authors:** Fanchen Kong, Xiaoling Yi, Yunhao Deng  
 **Affiliation:** KU Leuven (MICAS)
@@ -120,7 +120,7 @@ Row 2 (co2)  [cnt]     [cnt]     [cnt]    <- what core 2 waits for
 
 This design eliminates the deadlock caused by the old 1-bit overlap detection, where a second `set` to an already-set bit was rejected, creating circular backpressure through the done queue.
 
-## Identity-Aware Dependencies (per-edge tags, opt-in)
+## Identity-Aware Dependencies (per-edge tags — the default)
 
 A plain counter cell is **identity-blind**: a `counter[row][col] >= 1` check knows
 the *number* of pending signals from a producer core, not *which* producer raised
@@ -129,22 +129,27 @@ the same `(consumer_core, producer_core)` pair, a consumer can drain a stray
 increment meant for a different consumer and dispatch **before its own input is
 ready** (the counter-sharing hazard; see `COUNTER_SHARING_BUG.md`).
 
-The fix adds **per-edge identity tags**, gated by the `EnableTaggedDeps` parameter
-(default **0** = legacy behavior, byte-identical):
+The fix is **per-edge identity tags**, the **default** (`EnableTaggedDeps=1`). It
+fully replaces the old `serialize_shared_counter_consumers` software mitigation,
+which only partially ordered producers and could break same-core data edges — that
+pass has been **removed**. (Set `EnableTaggedDeps=0` for the legacy identity-blind
+matrix, which then has *no* counter-sharing mitigation.)
 
 - **Hardware (`EnableTaggedDeps=1`):** each cell becomes a `2**DepTagWidth`
   **presence-bit scoreboard**. A `set` writes the bit at its `dep_set_tag`; a
   `check` passes only on its own `dep_check_tag`; `clear` clears that one bit. A
   stray increment carries a tag no consumer expects, so it can never satisfy an
-  unrelated check. At `DepTagWidth=3` the scoreboard is the same size as today's
-  8-bit counters (area-neutral); the legacy/tagged paths are selected by a
-  conditional `generate`, so the disabled path is pruned.
+  unrelated check. `DepTagWidth=4` (default) sizes the scoreboard to a layer's
+  natural concurrency; the legacy/tagged paths are selected by a conditional
+  `generate`, so the disabled path is pruned.
 - **Software (mini-compiler):** `bingo_transform_dfg_allocate_dep_tags(W)` assigns
   each edge a tag via an optimal **minimum chain-cover** of the happens-before
-  partial order per cell (edges that can never be live at once share a tag).
+  partial order per cell (edges that can never be live at once share a tag). The
+  order accounts for **same-core HOL** execution (each core dispatches its tasks in
+  topological order), which collapses same-core/diagonal cells to a chain.
   `bingo_transform_dfg_spill_for_tag_capacity(W)` is an **auto-spill** pre-pass: a
   windowed throttle that bounds each cell's concurrently-live edges to `2**W`, so
-  a small fixed hardware tag width always suffices. The compiler does the heavy
+  the small fixed hardware tag width always suffices. The compiler does the heavy
   lifting; the hardware stays tiny.
 
 The tags ride the existing datapath: they live inside `dep_check_info`/
@@ -191,8 +196,8 @@ bingo_hw_manager_top
  |    +-- stream_demux (route to cluster, ready+checkout path)
  |
  +-- Per-Cluster Dep Matrix (NUM_CLUSTERS_PER_CHIPLET instances)
- |    +-- dep_matrix (counter-based 8-bit cells; or tagged presence-bit
- |        scoreboard when EnableTaggedDeps=1)
+ |    +-- dep_matrix (tagged presence-bit scoreboard by default; legacy
+ |        counter-based 8-bit cells when EnableTaggedDeps=0)
  |
  +-- Per-(Core, Cluster) Queues (N_CORES x N_CLUSTERS instances each)
  |    +-- Ready Queue: read_mailbox or fifo_v3
@@ -221,8 +226,8 @@ bingo_hw_manager_top
 |-----------|---------|-------------|
 | `NUM_CORES_PER_CLUSTER` | 4 | Execution cores per cluster |
 | `NUM_CLUSTERS_PER_CHIPLET` | 2 | Clusters per chiplet |
-| `EnableTaggedDeps` | 0 | 0: legacy counter matrix, 1: identity-aware tagged scoreboard |
-| `DepTagWidth` | 3 | Tag width (cell holds up to `2**DepTagWidth` concurrent edges) |
+| `EnableTaggedDeps` | 1 | 1: identity-aware tagged scoreboard (default), 0: legacy counter matrix |
+| `DepTagWidth` | 4 | Tag width (cell holds up to `2**DepTagWidth` concurrent edges) |
 | `TaskIdWidth` | 12 | Task ID width (max 4096 tasks) |
 | `ChipIdWidth` | 8 | Chiplet ID width (max 256 chiplets) |
 | `HostAxiLiteAddrWidth` | 48 | Host-side AXI address width |
@@ -336,7 +341,7 @@ Two layers, both self-contained in this repo:
   pytest suite in `model/tests/`:
   - `test_dep_matrix.py` — the matrix primitive (legacy counter + tagged scoreboard)
   - `test_single_chiplet.py`, `test_multi_chiplet.py` — pipeline / H2H integration
-  - `test_shared_counter_serialization.py`, `test_cross_cluster_handoff_guard.py` — SW mitigations
+  - `test_cross_cluster_handoff_guard.py` — cross-cluster placement guard
   - `test_identity_stray_increment.py` — reproduces the counter-sharing hazard and shows the tag fix closes it
   - `test_dep_tag_allocator.py` — the tag allocator (min-chain-cover) + auto-spill + capacity backstop
   - `test_dep_sync.py` — multi-cluster dispatch-before-producer gate (legacy hazard → tagged clean); also runnable as a CLI

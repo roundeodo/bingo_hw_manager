@@ -7,16 +7,14 @@ signals from the producer core, not WHICH producer raised them. So a "+1" raised
 for one consumer can be drained by an unrelated consumer that shares the cell.
 
 This test reproduces the worked example from COUNTER_SHARING_BUG.md (the DAG
-"entry node" stray increment) inside the in-repo model. Unlike
-test_shared_counter_serialization.py, the stray here is PINNED EARLY: the entry
-root `E` both gates the producer chain AND feeds a queue-late consumer through the
-SAME cell. So `serialize_shared_counter_consumers` cannot order the stray after
-the real producer (doing so would create a cycle -- E is an ancestor of pA), and
-the bug survives the FULL compiler pipeline.
+"entry node" stray increment) inside the in-repo model: the entry root `E` both
+gates the producer chain that feeds consumer cA AND feeds a queue-late consumer
+through the SAME cell[CONS][PROD], so its early "+1" is a stray on cA's cell.
 
 Invariant under test (the correct, identity-aware behavior): a consumer must not
-dispatch before every one of its real producers is DONE. This FAILS on today's
-identity-blind model and is the gate the tag fix must turn green.
+dispatch before every one of its real producers is DONE. The per-edge tags make
+cA wait for ITS producer's tag, not the stray's -- so this passes only because of
+the identity-aware allocation.
 """
 import sys, os
 import networkx as nx
@@ -59,16 +57,11 @@ def _to_descriptors(dfg):
 
 
 def _build():
-    """Entry root E (PROD) gates pA via TWO same-core paths (E->A0->pA and
-    E->B0->pA) AND feeds a queue-late consumer cLate (CONS). pA feeds the early
-    consumer cA (CONS). cA and cLate share counter[CONS][PROD]; E's early +1
-    (meant for cLate) is drained by cA before pA is done.
-
-    The two paths matter: `serialize_shared_counter_consumers` tries to order E's
-    set after pA by cutting ONE of E's same-core successor edges, but the other
-    path still orders E before pA, so the re-splice bails (bingo_dfg.py:170-174)
-    and the stray survives the FULL pipeline -- exactly the pinned-early entry
-    node from COUNTER_SHARING_BUG.md."""
+    """Entry root E (PROD) gates pA (via E->A0->pA / E->B0->pA) AND feeds a
+    queue-late consumer cLate (CONS). pA feeds the early consumer cA (CONS). cA and
+    cLate share counter[CONS][PROD]; E's early +1 (meant for cLate) would be drained
+    by cA before pA is done on the identity-blind matrix. The per-edge tags give
+    cA's and cLate's edges distinct tags, so cA waits for pA specifically."""
     d = BingoDFG()
     def N(core, name):
         n = BingoNode(0, 0, core, name); d.bingo_add_node(n); return n
@@ -96,7 +89,6 @@ def _dispatch_done_times(trace):
 def _run():
     d, prod_id, cons_id = _build()
     d.bingo_compile_conditional_regions()
-    d.bingo_transform_dfg_serialize_shared_counter_consumers()   # full SW pipeline
     d.bingo_transform_dfg_add_dummy_set_nodes()
     d.bingo_transform_dfg_add_dummy_check_nodes()
     d.bingo_assign_normal_node_dep_check_info()

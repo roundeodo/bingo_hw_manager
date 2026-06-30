@@ -70,7 +70,7 @@ typedef logic [cf_math_pkg::idx_width(NUM_CLUSTERS_PER_CHIPLET)-1:0] bingo_hw_ma
 typedef logic [cf_math_pkg::idx_width(NUM_CORES_PER_CLUSTER)-1:0]    bingo_hw_manager_assigned_core_id_t;
 typedef logic [NUM_CORES_PER_CLUSTER-1:0]                            bingo_hw_manager_dep_code_t;
 // Per-edge identity tag (must mirror bingo_hw_manager_top exactly).
-localparam int unsigned DEP_TAG_WIDTH = 3;
+localparam int unsigned DEP_TAG_WIDTH = 4;
 typedef logic [DEP_TAG_WIDTH-1:0]                                    bingo_hw_manager_dep_tag_t;
 // Opt-in: a testbench that `define`s BINGO_TAGGED_DEPS before including this
 // harness instantiates the DUT with identity-aware dep tracking enabled.

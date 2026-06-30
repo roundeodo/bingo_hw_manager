@@ -134,11 +134,14 @@ class AdaptiveSchedulingLoop:
         # -- Compile --------------------------------------------------
         with contextlib.redirect_stdout(io.StringIO()):
             dfg.bingo_compile_conditional_regions()
-            dfg.bingo_transform_dfg_serialize_shared_counter_consumers()
+            # Identity-aware deps (replaces the removed serialize mitigation):
+            # bound each cell to <= 2**4 concurrent edges, then allocate per-edge tags.
+            dfg.bingo_transform_dfg_spill_for_tag_capacity(tag_width=4)
             dfg.bingo_transform_dfg_add_dummy_set_nodes()
             dfg.bingo_transform_dfg_add_dummy_check_nodes()
             dfg.bingo_assign_normal_node_dep_check_info()
             dfg.bingo_assign_normal_node_dep_set_info()
+            dfg.bingo_transform_dfg_allocate_dep_tags(tag_width=4)
 
         # -- Resolve active nodes -------------------------------------
         if active_nodes is not None:

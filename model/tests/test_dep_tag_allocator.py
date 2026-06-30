@@ -25,7 +25,6 @@ CONS, PROD = 0, 1
 
 def _compile(d, tag_width=3):
     d.bingo_compile_conditional_regions()
-    d.bingo_transform_dfg_serialize_shared_counter_consumers()
     d.bingo_transform_dfg_add_dummy_set_nodes()
     d.bingo_transform_dfg_add_dummy_check_nodes()
     d.bingo_assign_normal_node_dep_check_info()
@@ -78,6 +77,24 @@ def test_shared_cell_edges_get_distinct_tags():
     """Two edges that may be simultaneously live on the same cell must not share
     a tag -- otherwise a consumer could drain the wrong producer's increment."""
     d = _compile(_shared_cell_dfg())
+
+    # Real runtime happens-before = DFG paths + same-core HOL (each core dispatches
+    # its tasks in topological order). Build that augmented graph, mirroring the
+    # allocator, so "shared tag => provably non-overlapping" is checked soundly.
+    hb = nx.DiGraph()
+    hb.add_nodes_from(d.nodes())
+    hb.add_edges_from(d.edges())
+    by_core = {}
+    for nd in nx.topological_sort(d):
+        by_core.setdefault((nd.assigned_chiplet_id, nd.assigned_cluster_id,
+                            nd.assigned_core_id), []).append(nd)
+    for seq in by_core.values():
+        for i in range(len(seq) - 1):
+            hb.add_edge(seq[i], seq[i + 1])
+
+    def _hb(consumer, producer):
+        return consumer is producer or nx.has_path(hb, consumer, producer)
+
     by_cell = {}
     for su, cv, cell in _dep_edges(d):
         by_cell.setdefault(cell, []).append((su, cv))
@@ -88,9 +105,8 @@ def test_shared_cell_edges_get_distinct_tags():
                 if sa.dep_set_tag != sb.dep_set_tag:
                     continue
                 # same tag is only allowed if the two edges can never overlap:
-                # one consumer happens-before the other producer.
-                ordered = nx.has_path(d, ca, sb) or nx.has_path(d, cb, sa)
-                assert ordered, (
+                # one's consumer happens-before the other's producer.
+                assert _hb(ca, sb) or _hb(cb, sa), (
                     f"cell {cell}: edges share tag {sa.dep_set_tag} but are not "
                     f"happens-before ordered (could alias)")
 
@@ -100,7 +116,6 @@ def test_capacity_backstop_raises():
     fail loudly rather than silently reintroduce the aliasing bug."""
     d = _shared_cell_dfg()
     d.bingo_compile_conditional_regions()
-    d.bingo_transform_dfg_serialize_shared_counter_consumers()
     d.bingo_transform_dfg_add_dummy_set_nodes()
     d.bingo_transform_dfg_add_dummy_check_nodes()
     d.bingo_assign_normal_node_dep_check_info()
@@ -125,7 +140,6 @@ def _parallel_cell_dfg(k):
 
 def _run_pipeline(d, tag_width, spill):
     d.bingo_compile_conditional_regions()
-    d.bingo_transform_dfg_serialize_shared_counter_consumers()
     if spill:
         d.bingo_transform_dfg_spill_for_tag_capacity(tag_width=tag_width)
     d.bingo_transform_dfg_add_dummy_set_nodes()

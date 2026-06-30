@@ -89,95 +89,6 @@ class BingoDFG(DiGraphWrapper[BingoNode]):
                 "(DMAWriteDataCorrect). Co-locate each chain on one cluster in the "
                 "bingo-framework placement. Offending edges:\n" + lines)
 
-    def bingo_transform_dfg_serialize_shared_counter_consumers(self) -> None:
-        """Serialize producers that feed a SHARED dependency-matrix counter cell.
-
-        Corner case
-        -----------
-        The dependency matrix holds one 8-bit *counter* per
-        ``(consumer_core, producer_core)`` pair, and a ``dep_check`` passes as
-        soon as ``counter[R][C] >= 1`` -- it knows the COUNT of pending signals
-        from core ``C``, not WHICH producer raised them. When two or more normal
-        consumers sit on the SAME core ``R`` and each waits (cross-core) on the
-        SAME producer core ``C``, they all check the SAME cell ``counter[R][C]``,
-        and every producer feeding any of them increments that one cell. A
-        consumer can then drain a *different* consumer's producer increment and
-        dispatch before its own input is actually ready.
-
-        Example: consumer A needs producers {a1 (early), a2 (late)} and consumer
-        B needs {b1 (early)}. All three increment ``counter[R][C]``; A's two
-        checks pass on the two EARLY increments (a1, b1) instead of (a1, a2), so
-        A dispatches before a2 has completed and reads stale data.
-
-        Fix
-        ---
-        Order the producers so each consumer's producers complete before the
-        next consumer's, matching the consumers' queue (topological) order.
-        Because the producers all live on the same core ``C``, this is a pure
-        queue-order / head-of-line serialization (same-core edges, no extra
-        cross-core counter traffic): add an edge from every earlier-consumer
-        producer to every later-consumer producer (skipping shared producers and
-        any edge that would create a cycle). The shared counter then accumulates
-        each consumer's increments contiguously and in order, so every consumer
-        drains exactly its own producers' signals.
-
-        Must run BEFORE the dummy_set / dummy_check passes so the added ordering
-        is reflected in the generated task descriptors.
-        """
-        topo = list(nx.topological_sort(self))
-        pos = {n: i for i, n in enumerate(topo)}
-        # (consumer_core R, producer_core C) -> [(consumer, [its producers on core C]), ...]
-        cells: dict = {}
-        for con in self.node_list:
-            if con.node_type != "normal":
-                continue
-            R = con.assigned_core_id
-            prods_by_core: dict = {}
-            for pred in self.predecessors(con):
-                if pred.assigned_core_id != R:                 # cross-core producer
-                    prods_by_core.setdefault(pred.assigned_core_id, []).append(pred)
-            for C, prods in prods_by_core.items():
-                # The dependency matrix is PER (chiplet, cluster): a consumer on
-                # cluster K checks that cluster's own counter[R][C], so only
-                # consumers on the SAME (chiplet, cluster) actually share a cell.
-                cells.setdefault((con.assigned_chiplet_id, con.assigned_cluster_id, R, C),
-                                 []).append((con, prods))
-
-        for (chip, cl, R, C), entries in cells.items():
-            if len(entries) < 2:                               # cell not shared -> nothing to do
-                continue
-            entries.sort(key=lambda e: pos[e[0]])              # consumers in queue (topo) order
-            for i in range(1, len(entries)):
-                prev_prods, cur_prods = entries[i - 1][1], entries[i][1]
-                for cp in cur_prods:
-                    for pp in prev_prods:
-                        if pp is cp or self.has_edge(pp, cp):
-                            continue
-                        if nx.has_path(self, cp, pp):
-                            # cp is already sequenced BEFORE pp on its core (a
-                            # pre-existing same-core chain orders cp ... pp). Adding
-                            # pp -> cp would cycle, so re-splice: cut cp's same-core
-                            # successor edge that leads to pp (pure sequencing -- cp's
-                            # data goes cross-core to its consumer), freeing cp. Then
-                            # order cp after pp below; the freed successor falls back
-                            # to topological order.
-                            succ = next((s for s in self.successors(cp)
-                                         if s.assigned_core_id == cp.assigned_core_id
-                                         and (s is pp or nx.has_path(self, s, pp))), None)
-                            if succ is None:
-                                continue                       # cannot safely reorder
-                            self.remove_edge(cp, succ)
-                            if nx.has_path(self, cp, pp):
-                                # another path still orders cp before pp: reordering
-                                # would cycle. Restore and leave this pair as-is.
-                                self.add_edge(cp, succ)
-                                continue
-                        self.add_edge(pp, cp)
-                        print(f"Serializing shared counter[c{chip}.{cl}][{R}][{C}]: "
-                              f"{pp.node_name} -> {cp.node_name} (producer of "
-                              f"'{entries[i-1][0].node_name}' before producer of "
-                              f"'{entries[i][0].node_name}')")
-
     def bingo_transform_dfg_add_dummy_set_nodes(self) -> None:
         """Transform the DFG to add dummy nodes."""
         # The idea of the dummy set nodes is to solve the problem of this kind
@@ -534,6 +445,24 @@ class BingoDFG(DiGraphWrapper[BingoNode]):
                 "dep-tag allocation: multi-target set/check ops (e.g. broadcast "
                 f"dep_set) need shared reserved tags; not yet supported: {multi}")
 
+        # Same-core HOL reachability: at runtime each core dispatches its tasks in
+        # topological (= push) order, so a same-core node that comes later is
+        # effectively reachable from an earlier one. Add those consecutive same-core
+        # edges to a SCRATCH graph used only for tag-reuse reachability (no real
+        # edges, dep info unchanged). This collapses same-core (diagonal R==C) cells
+        # -- which are serialized by the core queue -- to a chain, so they need few
+        # tags instead of one per edge.
+        hb = nx.DiGraph()
+        hb.add_nodes_from(self.nodes())
+        hb.add_edges_from(self.edges())
+        by_core: dict = {}
+        for nd in topo:
+            by_core.setdefault((nd.assigned_chiplet_id, nd.assigned_cluster_id,
+                                nd.assigned_core_id), []).append(nd)
+        for seq in by_core.values():
+            for i in range(len(seq) - 1):
+                hb.add_edge(seq[i], seq[i + 1])
+
         # 2. Per cell: assign the MINIMUM number of tags via a minimum chain
         #    partition of the edges under the happens-before partial order.
         #
@@ -550,9 +479,13 @@ class BingoDFG(DiGraphWrapper[BingoNode]):
         for key, edges in cells.items():
             edges.sort(key=lambda e: (pos[e[0]], pos[e[1]]))
             n = len(edges)
-            # reach[a] = nodes reachable from edge a's consumer (its drain point)
-            reach = [nx.descendants(self, cv) for (_su, cv) in edges]
-            # a precedes b  <=>  edge b's producer is reachable from edge a's drain
+            # reach[a] = nodes reachable from edge a's consumer (its drain point) in
+            # the same-core-augmented graph -- so DFG paths AND same-core HOL order.
+            reach = [nx.descendants(hb, cv) for (_su, cv) in edges]
+            # a precedes b (may share a tag) iff edge a's drain happens-before edge
+            # b's set: they meet at one node (a's consumer IS b's producer -- a node
+            # dispatches/drains before it completes/sets), or b's producer is
+            # reachable from a's consumer (DFG path or same-core HOL order).
             B = nx.Graph()
             for a in range(n):
                 B.add_node(("L", a)); B.add_node(("R", a))
@@ -560,10 +493,6 @@ class BingoDFG(DiGraphWrapper[BingoNode]):
                 for b in range(n):
                     if a == b:
                         continue
-                    # a precedes b (may share a tag) iff edge a's drain happens
-                    # before edge b's set: either they meet at one node (a's
-                    # consumer IS b's producer -- dispatch precedes completion) or
-                    # b's producer is reachable from a's consumer.
                     if edges[b][0] is edges[a][1] or edges[b][0] in reach[a]:
                         B.add_edge(("L", a), ("R", b))
             match = (nx.algorithms.bipartite.hopcroft_karp_matching(

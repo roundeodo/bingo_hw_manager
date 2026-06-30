@@ -15,11 +15,13 @@ module bingo_hw_manager_top #(
     parameter int unsigned NUM_CLUSTERS_PER_CHIPLET = 2,
     parameter int unsigned ChipIdWidth = 8,
     parameter int unsigned TaskIdWidth = 12,
-    // Opt-in identity-aware dependency tracking (per-edge tags). Default OFF =
-    // legacy identity-blind dep matrix, byte-identical behavior. When 1, the
-    // mini-compiler's per-edge tags are plumbed to the tagged dep-matrix scoreboard.
+    // Identity-aware dependency tracking (per-edge tags), DEFAULT ON. The
+    // mini-compiler's per-edge tags are plumbed to the tagged dep-matrix scoreboard
+    // so a consumer drains only ITS producer's increment. Set to 0 for the legacy
+    // identity-blind matrix (no counter-sharing mitigation; the SW serialize
+    // workaround has been removed -- tags supersede it).
     parameter bit          EnableTaggedDeps = 1'b1,
-    parameter int unsigned DepTagWidth = 3,
+    parameter int unsigned DepTagWidth = 4,
     // AXI interface types
     // The task queue holds tasks to be scheduled to the devices
     // Host writes the task queue via 64bit AXI Lite

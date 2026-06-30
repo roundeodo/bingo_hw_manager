@@ -36,10 +36,9 @@ GEMM, DMA, HOST = 0, 1, 2          # core ids (row/col of the dep matrix)
 def build_stress_dfg(n_clusters=2):
     """A synthetic multi-cluster stress DFG that reproduces the counter-sharing
     hazard. In each cluster: an entry root on the producer core gates a late
-    producer pA via TWO same-core paths (so the serialize pass cannot move it)
-    AND feeds a queue-late consumer cLate through the SAME cell[CONS][PROD] -- the
-    pinned-early stray. Across clusters: cluster k's producer also strays onto
-    cluster 0's busy column, aliasing it (the cross-cluster hazard)."""
+    producer pA AND feeds a queue-late consumer cLate through the SAME
+    cell[CONS][PROD] -- the pinned-early stray. Across clusters: cluster k's
+    producer also strays onto cluster 0's busy column (the cross-cluster hazard)."""
     d = BingoDFG()
     CONS, PROD = GEMM, DMA         # consumers on GEMM core, producers on DMA core
     per_cluster = {}
@@ -77,7 +76,6 @@ def compile_dfg(d, tagged, tag_width):
     """Run the mini-compiler pipeline; with `tagged`, add auto-spill + per-edge
     tag allocation (the identity-aware fix)."""
     d.bingo_compile_conditional_regions()
-    d.bingo_transform_dfg_serialize_shared_counter_consumers()
     if tagged:
         d.bingo_transform_dfg_spill_for_tag_capacity(tag_width=tag_width)
     d.bingo_transform_dfg_add_dummy_set_nodes()

@@ -284,9 +284,12 @@ bingo_dfg.bingo_add_edge(chip2_cluster0_core0_gemm_2, chip3_cluster0_core0_gemm_
 #                 chiplet3
 bingo_dfg.bingo_visualize_dfg("original_dfg.png")
 
-# Serialize producers that share a (consumer_core, producer_core) counter cell
-# across multiple consumers, so each consumer drains exactly its own producers.
-bingo_dfg.bingo_transform_dfg_serialize_shared_counter_consumers()
+# Identity-aware deps: bound each dep-matrix cell to <= 2**TAG_W concurrently-live
+# edges (the auto-spill throttle), then allocate per-edge tags after dep-info
+# assignment. Replaces the removed legacy serialize_shared_counter_consumers
+# mitigation -- per-edge tags make a consumer drain only ITS producer's increment.
+TAG_W = 4  # must match the hw_manager EnableTaggedDeps build's DepTagWidth
+bingo_dfg.bingo_transform_dfg_spill_for_tag_capacity(tag_width=TAG_W)
 # Transform the DFG to add dummy set nodes
 bingo_dfg.bingo_transform_dfg_add_dummy_set_nodes()
 bingo_dfg.bingo_visualize_dfg("dfg_after_add_dummy_dep_set_nodes.png")
@@ -296,5 +299,7 @@ bingo_dfg.bingo_visualize_dfg("dfg_after_add_dummy_dep_check_nodes.png")
 # Set the Dep Set and Dep Check for the normal nodes
 bingo_dfg.bingo_assign_normal_node_dep_set_info()
 bingo_dfg.bingo_assign_normal_node_dep_check_info()
+# Allocate per-edge identity tags (must run last, after every set/check op is final)
+bingo_dfg.bingo_transform_dfg_allocate_dep_tags(tag_width=TAG_W)
 print(bingo_dfg.bingo_emit_task_desc_sv())
 print(bingo_dfg.bingo_emit_push_task_sv())

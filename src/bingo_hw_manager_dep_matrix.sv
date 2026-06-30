@@ -46,10 +46,11 @@ module bingo_hw_manager_dep_matrix #(
     parameter int unsigned DEP_MATRIX_COLS = 4,
     // Counter width per cell (8 bits supports up to 255 pending signals)
     parameter int unsigned COUNTER_WIDTH = 8,
-    // Opt-in identity-aware dependency tracking (default OFF = legacy behavior)
-    parameter bit          EnableTaggedDeps = 1'b0,
+    // Identity-aware dependency tracking, DEFAULT ON. Set to 0 for the legacy
+    // identity-blind saturating-counter matrix (byte-identical to the original).
+    parameter bit          EnableTaggedDeps = 1'b1,
     // Tag width: a cell holds up to 2**TagWidth concurrently-live edges
-    parameter int unsigned TagWidth = 3,
+    parameter int unsigned TagWidth = 4,
     /// Dependent parameters, DO NOT OVERRIDE!
     // pattern to check per row (which columns to check)
     parameter type dep_check_code_t = logic [DEP_MATRIX_COLS-1:0],
