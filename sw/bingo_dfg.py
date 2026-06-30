@@ -5,6 +5,11 @@ from bingo_utils import DiGraphWrapper
 from bingo_node import BingoNode
 import networkx as nx
 MAX_NUM_CHIPLETS = 8
+# The device DMA core: iDMA load/store + every xDMA convert/reshuffle/reduce is HW-bound
+# here, so it is the busiest column of the per-cluster dep matrix. A CROSS-cluster producer
+# on this core aliases the consumer cluster's own core-1 traffic (the column is the BARE
+# producer core, not cluster-qualified) -> see bingo_assert_no_cross_cluster_samecore_handoff.
+DMA_CORE = 1
 class BingoDFG(DiGraphWrapper[BingoNode]):
     """Data Flow Graph (DFG) for Bingo."""
 
@@ -45,7 +50,45 @@ class BingoDFG(DiGraphWrapper[BingoNode]):
         self.add_edge(from_node_obj, new_node_obj)
         # new_node → dst: inherit original edge attributes
         self.add_edge(new_node_obj, to_node_obj, **edge_data)
-        
+
+    def bingo_assert_no_cross_cluster_samecore_handoff(self) -> None:
+        """Compile-time guard for the UNQUALIFIED (main-branch) HW dep matrix.
+
+        The per-cluster dependency matrix's column is the BARE producer core id (not
+        cluster-qualified). Every cluster's core-1 DMA/convert/load/store ops therefore
+        collapse onto the consumer cluster's counter[*][1] cell, so a CROSS-cluster
+        producer on core 1 is indistinguishable from the consumer cluster's own core-1
+        traffic: the consumer can pass its counter>=1 check on an unrelated increment and
+        dispatch before its true remote producer wrote L3 -> DMAWriteDataCorrect / hang.
+
+        This guard FAILS compilation if any producer->consumer data edge is a cross-cluster
+        hand-off whose producer is on the DMA core (core 1). The bingo-framework placement
+        must keep such chains intra-cluster (co-locate them; single-cluster is the simplest).
+        Common case: core1->core1; a core1->host(core2) store->dequant is also caught.
+        """
+        bad = []
+        for u, v in self.edges():
+            if (getattr(u, "node_type", "normal") != "normal"
+                    or getattr(v, "node_type", "normal") != "normal"):
+                continue
+            if (u.assigned_chiplet_id == v.assigned_chiplet_id
+                    and u.assigned_cluster_id != v.assigned_cluster_id
+                    and u.assigned_core_id == DMA_CORE):
+                bad.append((u, v))
+        if bad:
+            lines = "\n".join(
+                f"  {u.node_name} @ (chiplet {u.assigned_chiplet_id}, cluster "
+                f"{u.assigned_cluster_id}, core {u.assigned_core_id})  ->  "
+                f"{v.node_name} @ (chiplet {v.assigned_chiplet_id}, cluster "
+                f"{v.assigned_cluster_id}, core {v.assigned_core_id})"
+                for u, v in bad)
+            raise ValueError(
+                f"[bingo] {len(bad)} cross-cluster DMA-core (core {DMA_CORE}) hand-off(s) "
+                "detected. On the unqualified HW dep matrix the producer's column aliases "
+                "the consumer cluster's own core-1 traffic -> the RTL hangs "
+                "(DMAWriteDataCorrect). Co-locate each chain on one cluster in the "
+                "bingo-framework placement. Offending edges:\n" + lines)
+
     def bingo_transform_dfg_serialize_shared_counter_consumers(self) -> None:
         """Serialize producers that feed a SHARED dependency-matrix counter cell.
 
@@ -380,6 +423,178 @@ class BingoDFG(DiGraphWrapper[BingoNode]):
                     cur_node.remote_dep_set_all = False
                     cur_node.dep_set_cluster_id = 0
                     cur_node.dep_set_chiplet_id = 0
+
+    def bingo_transform_dfg_spill_for_tag_capacity(self, tag_width: int = 3) -> None:
+        """Auto-spill: bound every dep-matrix cell to <= 2**tag_width
+        concurrently-live edges so the later tag allocator fits a SMALL fixed HW
+        tag width (keeps the scoreboard tiny; the heavy lifting is here in SW).
+
+        Run BEFORE the dummy-set / dummy-check passes and the dep-info
+        assignment, so the ordering edges this inserts become REAL, enforced
+        dependencies (a raw graph edge added after assignment would not gate
+        anything at runtime).
+
+        Mechanism (a windowed throttle, the register-allocation 'spill'): group
+        the original producer->consumer edges by physical cell
+        ``(consumer_chiplet, consumer_cluster, R, C)``; if a cell has more than
+        ``cap = 2**tag_width`` edges, add an ordering edge from edge[i-cap]'s
+        CONSUMER to edge[i]'s PRODUCER. Edge[i] then cannot set until edge[i-cap]
+        has been drained, so at most ``cap`` of the cell's edges are ever live at
+        once -- which is exactly the number of tags the allocator needs. A tag is
+        freed (by the consumer's clear) before the throttled producer sets, so
+        reuse is sound regardless of work-delay timing.
+
+        This is a HEURISTIC that only ADDS happens-before ordering: it can never
+        make tagging unsafe (the allocator's per-cell coloring + 2**tag_width
+        backstop remain the correctness guard); at worst an awkward graph leaves a
+        cell over capacity and the allocator raises, exactly as without spill.
+        Cost: less producer/consumer overlap (latency) and extra traffic on the
+        reverse cell (C, R); cycle-creating throttles are skipped.
+        """
+        cap = 1 << tag_width
+        topo = list(nx.topological_sort(self))
+        pos = {n: i for i, n in enumerate(topo)}
+
+        cells: dict = {}                      # (chip, cl, R, C) -> [(producer, consumer), ...]
+        for u, v in self.edges():
+            if u.node_type == "dummy" or v.node_type == "dummy":
+                continue
+            cells.setdefault((v.assigned_chiplet_id, v.assigned_cluster_id,
+                              v.assigned_core_id, u.assigned_core_id), []).append((u, v))
+
+        for key, edges in cells.items():
+            if len(edges) <= cap:
+                continue                       # cell already within tag budget
+            edges.sort(key=lambda e: (pos[e[0]], pos[e[1]]))
+            for i in range(cap, len(edges)):
+                donor_consumer = edges[i - cap][1]   # whose drain frees a tag
+                recv_producer  = edges[i][0]         # who must wait for that tag
+                if donor_consumer is recv_producer:
+                    continue
+                if self.has_edge(donor_consumer, recv_producer):
+                    continue
+                if nx.has_path(self, recv_producer, donor_consumer):
+                    continue                   # would create a cycle -> skip (backstop covers it)
+                self.bingo_add_edge(donor_consumer, recv_producer)
+                print(f"Spill throttle cell c{key[0]}.{key[1]}[{key[2]}][{key[3]}]: "
+                      f"{donor_consumer.node_name} -> {recv_producer.node_name} "
+                      f"(cap={cap})")
+
+    def bingo_transform_dfg_allocate_dep_tags(self, tag_width: int = 3) -> None:
+        """Assign per-edge identity tags (EnableTaggedDeps) so a consumer drains
+        only ITS producer's increment, never a stray that happens to share the
+        same dep-matrix cell.
+
+        Must run LAST -- after the dummy-set / dummy-check passes and the
+        dep-info assignment -- when every set/check operation is final. By then
+        each dependency is a single DIRECT edge ``set_node -> check_node`` (the
+        dummy passes split every fork/multi-producer into single-edge ops), so
+        one ``dep_set_tag`` and one ``dep_check_tag`` per node suffice.
+
+        Physical cell = ``(consumer_chiplet, consumer_cluster, R, C)`` with
+        ``R = consumer core`` and ``C = producer core`` (the bare-core column, so
+        cross-cluster / cross-chiplet producers fold onto the same cell -- and the
+        tag is exactly what keeps them apart). Within a cell, two edges may share
+        a tag iff a DFG happens-before path links one edge's CONSUMER to the
+        other's PRODUCER (``has_path(consumerA, producerB)``): then B's set can
+        only fire after A has dispatched and freed the tag, regardless of work
+        delays. Tags are assigned by greedy coloring that exploits this reuse.
+
+        ``tag_width`` is the fixed HW knob: a cell may hold at most ``2**tag_width``
+        concurrently-live edges. If coloring needs more, raise -- the compiler
+        must serialize (spill) to stay within the bound; we fail loudly rather
+        than silently reintroduce the aliasing bug.
+        """
+        max_tags = 1 << tag_width
+        topo = list(nx.topological_sort(self))
+        pos = {n: i for i, n in enumerate(topo)}
+
+        # 1. Collect dep-matrix set/check edges, grouped by physical cell.
+        cells: dict = {}                      # (chip, cl, R, C) -> [(set_node, check_node), ...]
+        set_edge_count: dict = {}             # set_node -> number of edges it drives
+        check_edge_count: dict = {}           # check_node -> number of edges it drains
+        for u, v in self.edges():
+            if not (u.dep_set_enable and v.dep_check_enable):
+                continue
+            C, R = u.assigned_core_id, v.assigned_core_id
+            if C not in v.dep_check_list or R not in u.dep_set_list:
+                continue                      # u sets / v checks, but not THIS pair
+            cells.setdefault((v.assigned_chiplet_id, v.assigned_cluster_id, R, C),
+                             []).append((u, v))
+            set_edge_count[u] = set_edge_count.get(u, 0) + 1
+            check_edge_count[v] = check_edge_count.get(v, 0) + 1
+
+        # A node driving/draining >1 edge would need >1 tag (only true broadcast
+        # dep-sets do this today). Tagging those needs a shared reserved tag per
+        # broadcast group -- not yet implemented; fail loudly instead of guessing.
+        multi = [n.node_name for n, c in set_edge_count.items() if c > 1] + \
+                [n.node_name for n, c in check_edge_count.items() if c > 1]
+        if multi:
+            raise NotImplementedError(
+                "dep-tag allocation: multi-target set/check ops (e.g. broadcast "
+                f"dep_set) need shared reserved tags; not yet supported: {multi}")
+
+        # 2. Per cell: assign the MINIMUM number of tags via a minimum chain
+        #    partition of the edges under the happens-before partial order.
+        #
+        #    Edge a strictly precedes edge b (a may share b's tag) iff a's CONSUMER
+        #    drains before b's PRODUCER sets: has_path(consumerA, producerB). Two
+        #    edges can share a tag iff they are comparable under this order (one
+        #    precedes the other) -- so a "tag class" is a CHAIN. The conflict graph
+        #    (incomparable edges) is the incomparability graph of a partial order,
+        #    which is perfect; by Dilworth the minimum #chains == the largest
+        #    antichain == the max number of simultaneously-live edges. Greedy
+        #    coloring is NOT optimal here, but min-chain-cover (bipartite matching)
+        #    is -- and it fits 2**tag_width exactly when spill has bounded the
+        #    antichain to that, so it never needs a stray extra tag.
+        for key, edges in cells.items():
+            edges.sort(key=lambda e: (pos[e[0]], pos[e[1]]))
+            n = len(edges)
+            # reach[a] = nodes reachable from edge a's consumer (its drain point)
+            reach = [nx.descendants(self, cv) for (_su, cv) in edges]
+            # a precedes b  <=>  edge b's producer is reachable from edge a's drain
+            B = nx.Graph()
+            for a in range(n):
+                B.add_node(("L", a)); B.add_node(("R", a))
+            for a in range(n):
+                for b in range(n):
+                    if a == b:
+                        continue
+                    # a precedes b (may share a tag) iff edge a's drain happens
+                    # before edge b's set: either they meet at one node (a's
+                    # consumer IS b's producer -- dispatch precedes completion) or
+                    # b's producer is reachable from a's consumer.
+                    if edges[b][0] is edges[a][1] or edges[b][0] in reach[a]:
+                        B.add_edge(("L", a), ("R", b))
+            match = (nx.algorithms.bipartite.hopcroft_karp_matching(
+                         B, top_nodes=[("L", a) for a in range(n)])
+                     if B.number_of_edges() else {})
+            succ, has_pred = {}, set()
+            for node, m in match.items():
+                if node[0] == "L":
+                    succ[node[1]] = m[1]; has_pred.add(m[1])
+            tag_of, n_chains = {}, 0
+            for a in range(n):
+                if a in has_pred:
+                    continue                       # not a chain head
+                cur = a
+                while True:
+                    tag_of[cur] = n_chains
+                    if cur in succ:
+                        cur = succ[cur]
+                    else:
+                        break
+                n_chains += 1
+            if n_chains > max_tags:
+                raise ValueError(
+                    f"dep-tag allocation: cell {key} needs {n_chains} > {max_tags} "
+                    f"concurrent tags (tag_width={tag_width}); run "
+                    f"bingo_transform_dfg_spill_for_tag_capacity or widen tag_width.")
+            # 3. Stamp the tag on both endpoints of each edge.
+            for i, (su, cv) in enumerate(edges):
+                su.dep_set_tag = tag_of[i]
+                cv.dep_check_tag = tag_of[i]
+
     # ----------------------------------------------------------------
     # DARTS Tier 1: Conditional Execution helpers
     # ----------------------------------------------------------------

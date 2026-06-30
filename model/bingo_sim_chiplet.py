@@ -34,6 +34,9 @@ class TaskDescriptor:
     dep_set_chiplet_id: int
     dep_set_cluster_id: int
     dep_set_code: int       # bitmask
+    # Per-edge identity tags (EnableTaggedDeps). None → legacy identity-blind path.
+    dep_check_tag: Optional[int] = None
+    dep_set_tag: Optional[int] = None
     # Flux Tier 1: Conditional Execution
     cond_exec_en: bool = False
     cond_exec_group_id: int = 0
@@ -203,7 +206,7 @@ class ChipletModel:
         # dep_set in Phase 1c, so set and clear interact correctly:
         #   set + clear in same cycle → cancel (counter unchanged)
         # ================================================================
-        self._pending_clears = []  # list of (cluster, row, check_code)
+        self._pending_clears = []  # list of (cluster, row, check_code, check_tag)
         for core in range(self.num_cores):
             events.extend(self._tick_dep_check_manager(core, cycle))
 
@@ -217,8 +220,8 @@ class ChipletModel:
         # This models the RTL's sequential update where set and clear
         # happen simultaneously at the clock edge.
         # ================================================================
-        for cluster, row, check_code in self._pending_clears:
-            self.dep_matrices[cluster].clear_row(row, check_code)
+        for cluster, row, check_code, check_tag in self._pending_clears:
+            self.dep_matrices[cluster].clear_row(row, check_code, check_tag)
 
         # ================================================================
         # Phase 1d: Core execution — dispatch from ready queue + countdown
@@ -245,7 +248,8 @@ class ChipletModel:
                 self.dep_check_fsm[core] = DepCheckState.WAIT_QUEUES
             else:
                 cluster = task.assigned_cluster_id
-                result = self.dep_matrices[cluster].check_row(core, task.dep_check_code)
+                result = self.dep_matrices[cluster].check_row(
+                    core, task.dep_check_code, task.dep_check_tag)
                 if result:
                     self.dep_check_fsm[core] = DepCheckState.WAIT_QUEUES
 
@@ -271,7 +275,7 @@ class ChipletModel:
 
             # DEFER dep_matrix clear — will be applied after dep_set in tick()
             if task.dep_check_en:
-                self._pending_clears.append((cluster, core, task.dep_check_code))
+                self._pending_clears.append((cluster, core, task.dep_check_code, task.dep_check_tag))
 
             # Flux Tier 1: CERF conditional skip check
             cond_skip = False
@@ -419,12 +423,13 @@ class ChipletModel:
         target_chiplet = task.dep_set_chiplet_id
         target_cluster = task.dep_set_cluster_id
         dep_set_code = task.dep_set_code
+        dep_set_tag = task.dep_set_tag
         source_core = task.assigned_core_id
 
         if target_chiplet == self.chiplet_id and not task.dep_set_all_chiplet:
             # Local: try dep_matrix set_column
             success = self.dep_matrices[target_cluster].set_column(
-                source_core, dep_set_code
+                source_core, dep_set_code, dep_set_tag
             )
             if not success:
                 return None  # Overlap → blocked, arbiter moves on
@@ -456,6 +461,7 @@ class ChipletModel:
                     "target_chiplet": target_chiplet,
                     "target_cluster": target_cluster,
                     "dep_set_code": dep_set_code,
+                    "dep_set_tag": dep_set_tag,
                     "source_core": source_core,
                     "broadcast": task.dep_set_all_chiplet,
                 },
@@ -466,8 +472,8 @@ class ChipletModel:
         """Try to drain one entry from chiplet_done_queue through dep_matrix."""
         if self.chiplet_done_queue.empty:
             return None
-        source_core, target_cluster, dep_set_code = self.chiplet_done_queue.peek()
-        success = self.dep_matrices[target_cluster].set_column(source_core, dep_set_code)
+        source_core, target_cluster, dep_set_code, dep_set_tag = self.chiplet_done_queue.peek()
+        success = self.dep_matrices[target_cluster].set_column(source_core, dep_set_code, dep_set_tag)
         if not success:
             return None  # Overlap
         self.chiplet_done_queue.pop()
@@ -539,9 +545,9 @@ class ChipletModel:
                         ))
         return events
 
-    def receive_chiplet_dep_set(self, source_core_id, target_cluster_id, dep_set_code):
+    def receive_chiplet_dep_set(self, source_core_id, target_cluster_id, dep_set_code, dep_set_tag=None):
         """Queue an incoming H2H dep_set into the chiplet_done_queue."""
-        self.chiplet_done_queue.push((source_core_id, target_cluster_id, dep_set_code))
+        self.chiplet_done_queue.push((source_core_id, target_cluster_id, dep_set_code, dep_set_tag))
 
     def is_idle(self) -> bool:
         """True if no work remains anywhere in this chiplet."""

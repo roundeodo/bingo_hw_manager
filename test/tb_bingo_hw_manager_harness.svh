@@ -69,13 +69,25 @@ typedef logic [ChipIdWidth-1:0]                                      bingo_hw_ma
 typedef logic [cf_math_pkg::idx_width(NUM_CLUSTERS_PER_CHIPLET)-1:0] bingo_hw_manager_assigned_cluster_id_t;
 typedef logic [cf_math_pkg::idx_width(NUM_CORES_PER_CLUSTER)-1:0]    bingo_hw_manager_assigned_core_id_t;
 typedef logic [NUM_CORES_PER_CLUSTER-1:0]                            bingo_hw_manager_dep_code_t;
+// Per-edge identity tag (must mirror bingo_hw_manager_top exactly).
+localparam int unsigned DEP_TAG_WIDTH = 3;
+typedef logic [DEP_TAG_WIDTH-1:0]                                    bingo_hw_manager_dep_tag_t;
+// Opt-in: a testbench that `define`s BINGO_TAGGED_DEPS before including this
+// harness instantiates the DUT with identity-aware dep tracking enabled.
+`ifdef BINGO_TAGGED_DEPS
+localparam bit ENABLE_TAGGED_DEPS = 1'b1;
+`else
+localparam bit ENABLE_TAGGED_DEPS = 1'b0;
+`endif
 
 typedef struct packed {
+    bingo_hw_manager_dep_tag_t                   dep_check_tag;
     bingo_hw_manager_dep_code_t                  dep_check_code;
     logic                                        dep_check_en;
 } bingo_hw_manager_dep_check_info_t;
 
 typedef struct packed {
+    bingo_hw_manager_dep_tag_t                   dep_set_tag;
     bingo_hw_manager_dep_code_t                  dep_set_code;
     bingo_hw_manager_assigned_cluster_id_t       dep_set_cluster_id;
     bingo_hw_manager_assigned_chiplet_id_t       dep_set_chiplet_id;
@@ -179,7 +191,9 @@ function automatic bingo_hw_manager_task_desc_full_t pack_normal_task(
     input logic                                  dep_set_all_chiplet,
     input bingo_hw_manager_assigned_chiplet_id_t dep_set_chiplet_id,
     input bingo_hw_manager_assigned_cluster_id_t dep_set_cluster_id,
-    input bingo_hw_manager_dep_code_t            dep_set_code
+    input bingo_hw_manager_dep_code_t            dep_set_code,
+    input bingo_hw_manager_dep_tag_t             dep_check_tag = '0,
+    input bingo_hw_manager_dep_tag_t             dep_set_tag = '0
 );
     bingo_hw_manager_task_desc_full_t tmp;
     tmp.task_type                        = task_type;
@@ -189,11 +203,13 @@ function automatic bingo_hw_manager_task_desc_full_t pack_normal_task(
     tmp.assigned_core_id                 = assigned_core_id;
     tmp.dep_check_info.dep_check_en      = dep_check_en;
     tmp.dep_check_info.dep_check_code    = dep_check_code;
+    tmp.dep_check_info.dep_check_tag     = dep_check_tag;
     tmp.dep_set_info.dep_set_en          = dep_set_en;
     tmp.dep_set_info.dep_set_all_chiplet = dep_set_all_chiplet;
     tmp.dep_set_info.dep_set_chiplet_id  = dep_set_chiplet_id;
     tmp.dep_set_info.dep_set_cluster_id  = dep_set_cluster_id;
     tmp.dep_set_info.dep_set_code        = dep_set_code;
+    tmp.dep_set_info.dep_set_tag         = dep_set_tag;
     tmp.cond_exec_en                     = 1'b0;
     tmp.cond_exec_group_id               = 5'b0;
     tmp.cond_exec_invert                 = 1'b0;
@@ -208,7 +224,8 @@ function automatic bingo_hw_manager_task_desc_full_t pack_dummy_check_task(
     input bingo_hw_manager_assigned_cluster_id_t assigned_cluster_id,
     input bingo_hw_manager_assigned_core_id_t    assigned_core_id,
     input logic                                  dep_check_en,
-    input bingo_hw_manager_dep_code_t            dep_check_code
+    input bingo_hw_manager_dep_code_t            dep_check_code,
+    input bingo_hw_manager_dep_tag_t             dep_check_tag = '0
 );
     bingo_hw_manager_task_desc_full_t tmp;
     tmp.task_type                        = task_type;
@@ -218,6 +235,7 @@ function automatic bingo_hw_manager_task_desc_full_t pack_dummy_check_task(
     tmp.assigned_core_id                 = assigned_core_id;
     tmp.dep_check_info.dep_check_en      = 1'b1;
     tmp.dep_check_info.dep_check_code    = dep_check_code;
+    tmp.dep_check_info.dep_check_tag     = dep_check_tag;
     tmp.dep_set_info                     = '0;
     tmp.cond_exec_en                     = 1'b0;
     tmp.cond_exec_group_id               = 5'b0;
@@ -236,7 +254,8 @@ function automatic bingo_hw_manager_task_desc_full_t pack_dummy_set_task(
     input logic                                  dep_set_all_chiplet,
     input bingo_hw_manager_assigned_chiplet_id_t dep_set_chiplet_id,
     input bingo_hw_manager_assigned_cluster_id_t dep_set_cluster_id,
-    input bingo_hw_manager_dep_code_t            dep_set_code
+    input bingo_hw_manager_dep_code_t            dep_set_code,
+    input bingo_hw_manager_dep_tag_t             dep_set_tag = '0
 );
     bingo_hw_manager_task_desc_full_t tmp;
     tmp.task_type                        = task_type;
@@ -250,6 +269,7 @@ function automatic bingo_hw_manager_task_desc_full_t pack_dummy_set_task(
     tmp.dep_set_info.dep_set_chiplet_id  = dep_set_chiplet_id;
     tmp.dep_set_info.dep_set_cluster_id  = dep_set_cluster_id;
     tmp.dep_set_info.dep_set_code        = dep_set_code;
+    tmp.dep_set_info.dep_set_tag         = dep_set_tag;
     tmp.cond_exec_en                     = 1'b0;
     tmp.cond_exec_group_id               = 5'b0;
     tmp.cond_exec_invert                 = 1'b0;
@@ -485,6 +505,8 @@ for (genvar chiplet_idx = 0; chiplet_idx < NUM_CHIPLET; chiplet_idx++) begin : g
         .TASK_QUEUE_TYPE                     ( TASK_QUEUE_TYPE                     ),
         .NUM_CORES_PER_CLUSTER               ( NUM_CORES_PER_CLUSTER               ),
         .NUM_CLUSTERS_PER_CHIPLET            ( NUM_CLUSTERS_PER_CHIPLET            ),
+        .EnableTaggedDeps                    ( ENABLE_TAGGED_DEPS                  ),
+        .DepTagWidth                         ( DEP_TAG_WIDTH                       ),
         .HostAxiLiteAddrWidth                ( HOST_AW                             ),
         .HostAxiLiteDataWidth                ( HOST_DW                             ),
         .DeviceAxiLiteAddrWidth              ( DEV_AW                              ),
@@ -714,8 +736,16 @@ for (genvar gi = 0; gi < NUM_CHIPLET; gi++) begin : gen_sig_export
     for (genvar gj = 0; gj < NUM_CLUSTERS_PER_CHIPLET; gj++) begin : gen_cl_export
         for (genvar gr = 0; gr < NUM_CORES_PER_CLUSTER; gr++) begin : gen_row_export
             for (genvar gc = 0; gc < NUM_CORES_PER_CLUSTER; gc++) begin : gen_col_export
-                assign dep_counter_state[gi][gj][gr][gc] =
-                    gen_dut[gi].i_dut.gen_dep_matrix[gj].i_dep_matrix.counter_q[gr][gc];
+                // The dep-matrix internals differ per mode: gen_legacy has a
+                // saturating counter per cell; gen_tagged has a presence-bit
+                // scoreboard. Probe whichever exists (monitor/dump only).
+                if (ENABLE_TAGGED_DEPS) begin : g_tag_probe
+                    assign dep_counter_state[gi][gj][gr][gc] =
+                        8'(|gen_dut[gi].i_dut.gen_dep_matrix[gj].i_dep_matrix.gen_tagged.sb_q[gr][gc]);
+                end else begin : g_legacy_probe
+                    assign dep_counter_state[gi][gj][gr][gc] =
+                        gen_dut[gi].i_dut.gen_dep_matrix[gj].i_dep_matrix.gen_legacy.counter_q[gr][gc];
+                end
             end
         end
     end

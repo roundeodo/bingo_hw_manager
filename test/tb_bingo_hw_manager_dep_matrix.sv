@@ -1,246 +1,134 @@
 `timescale 1ns/1ps
 
+// Unit testbench for bingo_hw_manager_dep_matrix.
+//
+// Covers BOTH modes of the module:
+//   * the default legacy identity-blind saturating-counter path (EnableTaggedDeps=0)
+//   * the opt-in identity-aware presence-bit scoreboard (EnableTaggedDeps=1)
+//
+// Stimulus is driven on the negedge and the DUT registers update on the posedge,
+// so a non-destructive "peek" can read the combinational result and deassert
+// dep_check_valid before the next posedge (the clear only fires when a check is
+// both valid and passing at a clock edge).
+
 module tb_bingo_hw_manager_dep_matrix();
 
-    // testbench parameters (match DUT default)
-    localparam int unsigned N = 4;
-    localparam int unsigned INPUT_WIDTH = (N > 1) ? $clog2(N) : 1;
+    localparam int unsigned N     = 4;
+    localparam int unsigned TAG_W = 3;
 
-    // clock / reset
     logic clk_i;
     logic rst_ni;
+    int   errors = 0;
 
-    // DUT signals (match new DUT interface)
-    logic [N-1:0]                      dep_check_valid_i;
-    logic [N-1:0]                      dep_check_result_o;
-    logic [N-1:0]                      dep_set_valid_i;
-    logic [N-1:0]                      dep_set_ready_o;
-    // arrays of vectors: indexed by row/column, each element is N-bit wide
-    logic [N-1:0]                      dep_check_code_i [N-1:0];
-    logic [N-1:0]                      dep_set_code_i   [N-1:0];
+    // Packed arrays matching the module's port types (dep_code_t [N-1:0], dep_tag_t [N-1:0]).
+    // -- Legacy DUT --
+    logic [N-1:0]              l_check_valid,  l_check_result, l_set_valid, l_set_ready;
+    logic [N-1:0][N-1:0]       l_check_code,   l_set_code;
+    logic [N-1:0][TAG_W-1:0]   l_check_tag,    l_set_tag;
+    // -- Tagged DUT --
+    logic [N-1:0]              t_check_valid,  t_check_result, t_set_valid, t_set_ready;
+    logic [N-1:0][N-1:0]       t_check_code,   t_set_code;
+    logic [N-1:0][TAG_W-1:0]   t_check_tag,    t_set_tag;
 
-    // helper variables
-    logic [INPUT_WIDTH-1:0] col;
-    logic [N-1:0]           pattern;
-    logic [N-1:0]           expected_row;
-
-    // Instantiate DUT
     bingo_hw_manager_dep_matrix #(
-        .DEP_MATRIX_ROWS(N),
-        .DEP_MATRIX_COLS(N)
-    ) dut (
-        .clk_i(clk_i),
-        .rst_ni(rst_ni),
-        .dep_check_valid_i(dep_check_valid_i),
-        .dep_check_code_i(dep_check_code_i),
-        .dep_check_result_o(dep_check_result_o),
-        .dep_set_valid_i(dep_set_valid_i),
-        .dep_set_ready_o(dep_set_ready_o),
-        .dep_set_code_i(dep_set_code_i)
+        .DEP_MATRIX_ROWS(N), .DEP_MATRIX_COLS(N), .EnableTaggedDeps(1'b0), .TagWidth(TAG_W)
+    ) dut_legacy (
+        .clk_i, .rst_ni,
+        .dep_check_valid_i(l_check_valid), .dep_check_code_i(l_check_code),
+        .dep_check_tag_i(l_check_tag), .dep_check_result_o(l_check_result),
+        .dep_set_valid_i(l_set_valid), .dep_set_ready_o(l_set_ready),
+        .dep_set_code_i(l_set_code), .dep_set_tag_i(l_set_tag)
     );
 
-    // Clock generator: 10 ns period
+    bingo_hw_manager_dep_matrix #(
+        .DEP_MATRIX_ROWS(N), .DEP_MATRIX_COLS(N), .EnableTaggedDeps(1'b1), .TagWidth(TAG_W)
+    ) dut_tagged (
+        .clk_i, .rst_ni,
+        .dep_check_valid_i(t_check_valid), .dep_check_code_i(t_check_code),
+        .dep_check_tag_i(t_check_tag), .dep_check_result_o(t_check_result),
+        .dep_set_valid_i(t_set_valid), .dep_set_ready_o(t_set_ready),
+        .dep_set_code_i(t_set_code), .dep_set_tag_i(t_set_tag)
+    );
+
     initial clk_i = 0;
     always #5 clk_i = ~clk_i;
 
-    // Task: drive a column write (synchronous in DUT)
-    // Updated to handle ready handshake
-    task automatic set_column(input int unsigned col_in,
-                              input logic [N-1:0] code);
-    begin
-        // prepare arrays: clear all entries, then assign selected column entry
-        for (int i = 0; i < N; i++) begin
-            dep_set_code_i[i] = '0;
-        end
-
-        // apply at clock edge
-        @(posedge clk_i);
-        dep_set_code_i[col_in]  <= code;
-        dep_set_valid_i         <= {N{1'b0}};
-        dep_set_valid_i[col_in] <= 1'b1;
-
-        // Wait for ready
-        wait (dep_set_ready_o[col_in] == 1'b1);
-
-        // allow DUT to sample on next posedge (synchronous update)
-        @(posedge clk_i);
-        #1;
-
-        // clear signals on next posedge
-        
-        dep_set_valid_i         <= '0;
-        for (int i = 0; i < N; i++) dep_set_code_i[i] <= '0;
-    end
+    // ---- Legacy helpers ----
+    task automatic l_set(input int col, input logic [N-1:0] rows);
+        @(negedge clk_i); l_set_valid = '0; l_set_valid[col] = 1'b1; l_set_code[col] = rows;
+        @(posedge clk_i); @(negedge clk_i); l_set_valid = '0; l_set_code[col] = '0;
+    endtask
+    task automatic l_consume(input int row, input logic [N-1:0] cols);
+        @(negedge clk_i); l_check_valid = '0; l_check_valid[row] = 1'b1; l_check_code[row] = cols;
+        @(posedge clk_i); @(negedge clk_i); l_check_valid = '0; l_check_code[row] = '0;
+    endtask
+    task automatic l_peek(input int row, input logic [N-1:0] cols, output logic res);
+        l_check_valid = '0; l_check_valid[row] = 1'b1; l_check_code[row] = cols; #1;
+        res = l_check_result[row]; l_check_valid[row] = 1'b0; l_check_code[row] = '0;
     endtask
 
-    // Task: check a single row (combinational result) - NON DESTRUCTIVE
-    task automatic check_row(input int unsigned row,
-                             input logic [N-1:0] expected_code,
-                             input bit expected_result);
-    begin
-        // prepare all check_code entries to zero
-        for (int i = 0; i < N; i++) dep_check_code_i[i] = '0;
-
-        @(posedge clk_i);
-        dep_check_code_i[row]   <= expected_code;
-        dep_check_valid_i       <= '0; // Non-destructive
-
-        // allow combinational result to settle within the same cycle
-        #1;
-        if (dep_check_result_o[row] !== expected_result) begin
-            $error("CHECK FAILED: row=%0d expected_code=%b expected_res=%0d got_res=%0d",
-                   row, expected_code, expected_result, dep_check_result_o[row]);
-        end else begin
-            $display("CHECK OK: row=%0d code=%b result=%0d", row, expected_code, dep_check_result_o[row]);
-        end
-    end
+    // ---- Tagged helpers ----
+    task automatic t_set(input int col, input logic [N-1:0] rows, input logic [TAG_W-1:0] tag);
+        @(negedge clk_i); t_set_valid = '0; t_set_valid[col] = 1'b1; t_set_code[col] = rows; t_set_tag[col] = tag;
+        @(posedge clk_i); @(negedge clk_i); t_set_valid = '0; t_set_code[col] = '0;
+    endtask
+    task automatic t_consume(input int row, input logic [N-1:0] cols, input logic [TAG_W-1:0] tag);
+        @(negedge clk_i); t_check_valid = '0; t_check_valid[row] = 1'b1; t_check_code[row] = cols; t_check_tag[row] = tag;
+        @(posedge clk_i); @(negedge clk_i); t_check_valid = '0; t_check_code[row] = '0;
+    endtask
+    task automatic t_peek(input int row, input logic [N-1:0] cols, input logic [TAG_W-1:0] tag, output logic res);
+        t_check_valid = '0; t_check_valid[row] = 1'b1; t_check_code[row] = cols; t_check_tag[row] = tag; #1;
+        res = t_check_result[row]; t_check_valid[row] = 1'b0; t_check_code[row] = '0;
     endtask
 
-    // Task: Consume/Clear a dependency (fires valid)
-    task automatic consume_row(input int unsigned row,
-                               input logic [N-1:0] code);
-    begin
-        for (int i = 0; i < N; i++) dep_check_code_i[i] = '0;
-        @(posedge clk_i);
-        dep_check_code_i[row] <= code;
-        dep_check_valid_i     <= '0;
-        dep_check_valid_i[row] <= 1'b1;
-        
-        @(posedge clk_i); // Turn off valid after one cycle
-        dep_check_valid_i[row] <= 1'b0;
-        dep_check_code_i[row]  <= '0;
-    end
+    task automatic expect_eq(input logic got, input logic exp, input string msg);
+        if (got !== exp) begin errors++; $error("FAIL: %s (got=%0b exp=%0b)", msg, got, exp); end
+        else $display("ok: %s = %0b", msg, got);
     endtask
 
-    // Test sequence
+    logic res;
     initial begin
-        // initialize inputs and valids
-        for (int i = 0; i < N; i++) begin
-            dep_check_code_i[i] = {N{1'b0}}; // Initialize to all zeros
-            dep_set_code_i[i]   = {N{1'b0}}; // Initialize to all zeros
-        end
-        dep_check_valid_i = {N{1'b0}}; // Initialize to all zeros
-        dep_set_valid_i   = {N{1'b0}}; // Initialize to all zeros
-        col               = '0;        // Initialize to zero
-        pattern           = '0;        // Initialize to zero
-        expected_row      = '0;        // Initialize to zero
+        l_check_valid='0; l_set_valid='0; l_check_code='0; l_set_code='0; l_check_tag='0; l_set_tag='0;
+        t_check_valid='0; t_set_valid='0; t_check_code='0; t_set_code='0; t_check_tag='0; t_set_tag='0;
+        rst_ni = 1'b0; repeat (2) @(posedge clk_i); rst_ni = 1'b1; @(negedge clk_i);
 
-        // apply reset (active low)
-        rst_ni = 1'b0;
-        repeat (2) @(posedge clk_i);
-        rst_ni = 1'b1;
-        @(posedge clk_i);
-        #1;
+        // ============ Legacy (identity-blind counter) ============
+        $display("--- legacy: ready is always high (counter design, no overlap rejection) ---");
+        expect_eq(&l_set_ready, 1'b1, "legacy dep_set_ready all high");
 
-        $display("RESET released, expect all rows to be zero");
+        $display("--- legacy: set / check / accumulate / clear ---");
+        l_set(1, 4'b0010);                                   // counter[1][1] = 1
+        l_peek(1, 4'b0010, res); expect_eq(res, 1'b1, "legacy row1 col1 set");
+        l_set(1, 4'b0010);                                   // counter[1][1] = 2 (accumulate)
+        l_consume(1, 4'b0010);                               // -> 1
+        l_peek(1, 4'b0010, res); expect_eq(res, 1'b1, "legacy still set after 1 of 2 clears");
+        l_consume(1, 4'b0010);                               // -> 0
+        l_peek(1, 4'b0010, res); expect_eq(res, 1'b0, "legacy cleared after 2nd clear");
 
-        // After reset DUT matrix should be zeros => checking row with zero code should pass
-        for (int i = 0; i < N; i++) begin
-            check_row(i, {N{1'b0}}, 1'b1); // row == 0 should match code 0 -> result 1
-        end
+        $display("--- legacy: subset check across columns ---");
+        l_set(0, 4'b0001); l_set(2, 4'b0001);                // row0: col0 and col2
+        l_peek(0, 4'b0101, res); expect_eq(res, 1'b1, "legacy row0 {col0,col2} set");
+        l_peek(0, 4'b0111, res); expect_eq(res, 1'b0, "legacy row0 {col0,col1,col2} -> col1 missing");
 
-        // Set column 1 to pattern 4'b1010 (bit index => row index)
-        col     = 1;
-        pattern = 4'b1010;
-        $display("Setting column %0d with pattern %b", col, pattern);
-        set_column(col, pattern);
+        // ============ Tagged (identity-aware scoreboard) ============
+        $display("--- tagged: a stray tag cannot satisfy a check for a different tag ---");
+        t_set(1, 4'b0001, 3'd7);                             // row0,col1 tagged 7 (stray)
+        t_peek(0, 4'b0010, 3'd2, res); expect_eq(res, 1'b0, "tagged row0 col1 tag2 (stray tag7) -> miss");
+        t_peek(0, 4'b0010, 3'd7, res); expect_eq(res, 1'b1, "tagged row0 col1 tag7 -> hit");
 
-        // After the set_column sequence the matrix has been updated. Verify each row
-        $display("Verifying matrix contents after first set...");
-        for (int i = 0; i < N; i++) begin
-            // build expected_row: a vector with a '1' at position 'col' if pattern[i] is 1
-            expected_row = '0;
-            if (pattern[i])
-                expected_row[col] = 1'b1;
+        $display("--- tagged: two edges on the same cell are independent per tag ---");
+        t_set(1, 4'b0001, 3'd1);                             // row0,col1 tag1
+        t_set(1, 4'b0001, 3'd2);                             // row0,col1 tag2 (same cell)
+        t_peek(0, 4'b0010, 3'd1, res); expect_eq(res, 1'b1, "tagged tag1 present");
+        t_consume(0, 4'b0010, 3'd1);                         // drain tag1 only
+        t_peek(0, 4'b0010, 3'd1, res); expect_eq(res, 1'b0, "tagged tag1 drained");
+        t_peek(0, 4'b0010, 3'd2, res); expect_eq(res, 1'b1, "tagged tag2 untouched");
 
-            // check correct code -> expect match (1)
-            // Note: We use the SUBSET check logic now.
-            // Row i is [0 1 0 0] if pattern[i] is 1, else 0.
-            // Check code expected_row is [0 1 0 0].
-            // (Mat & Check) == Check -> ( [0 1 0 0] & [0 1 0 0] ) == [0 1 0 0] -> OK.
-            
-            // To properly test the subset logic, we should set another bit and see if it passes.
-            check_row(i, expected_row, 1'b1);
-        end
-
-        // Test Overlap / Ready Logic
-        $display("Testing Overlap/Ready logic...");
-        // Try to set the same pattern again on the same column.
-        // Matrix already has 1s where pattern has 1s.
-        // Ready should be LOW.
-        @(posedge clk_i);
-        dep_set_code_i[col]  <= pattern;
-        dep_set_valid_i[col] <= 1'b1;
-        #1;
-        if (dep_set_ready_o[col] !== 1'b0) begin
-             $error("READY CHECK FAILED: Expected ready=0 for overlap, got %b", dep_set_ready_o[col]);
-        end else begin
-             $display("READY CHECK OK: Overlap correctly detected.");
-        end
-        @(posedge clk_i);
-        dep_set_valid_i[col] <= 1'b0;
-
-
-        // Test Subset Check Logic
-        $display("Testing Subset Check logic...");
-        // Set another bit in row 1, column 2.
-        // Row 1 currently has column 1 set (pattern[1]=1 in 4'b1010). Row 1 = [0 1 0 0].
-        // We add col 2.
-        col = 2;
-        pattern = 4'b0010; // Only row 1 affected
-        set_column(col, pattern);
-        
-        // Now Row 1 should have col 1 AND col 2 set. Row 1 = [0 1 1 0].
-        // Check only for col 1. Should pass.
-        // Check code: [0 1 0 0]
-        // Matrix:     [0 1 1 0]
-        // (Mat & Check) = [0 1 0 0] == Check -> Pass.
-        check_row(1, 4'b0010, 1'b1); // Checking for col 1 (bit 1)
-
-        // Check only for col 2. Should pass.
-        check_row(1, 4'b0100, 1'b1); // Checking for col 2 (bit 2)
-
-        // Check for col 1 AND col 2. Should pass.
-        check_row(1, 4'b0110, 1'b1); 
-        
-        // Check for col 3 (not set). Should fail.
-        check_row(1, 4'b1000, 1'b0);
-
-        // Check for col 1 AND col 3. Should fail.
-        check_row(1, 4'b1010, 1'b0);
-
-        // Test Clearing Logic
-        $display("Testing Clearing Check logic...");
-        // At this point, Row 1 has col 1 and col 2 set. Row 1 = [0 1 1 0].
-        // We will consume (clear) col 1 (bit 1).
-        consume_row(1, 4'b0010);
-
-        // Now Row 1 should be [0 1 0 0] (bit 1 cleared).
-        // Check col 1 -> Should fail (already consumed)
-        check_row(1, 4'b0010, 1'b0);
-        
-        // Check col 2 -> Should still pass (not consumed yet)
-        check_row(1, 4'b0100, 1'b1);
-        
-        // Check col 1 | col 2 combined -> Should fail because col 1 is missing
-        check_row(1, 4'b0110, 1'b0);
-
-        // Consume col 2
-        consume_row(1, 4'b0100);
-        
-        // Now Row 1 should be [0 0 0 0] (empty)
-        check_row(1, 4'b0100, 1'b0);
-        check_row(1, 4'b0110, 1'b0);
-
-
-        $display("All tests passed");
+        if (errors == 0) $display("All dep_matrix tests passed");
+        else             $error("%0d dep_matrix test(s) FAILED", errors);
         #10 $finish;
     end
 
-    // Timeout safety
-    initial begin
-        #10000;
-        $fatal("TIMEOUT");
-    end
+    initial begin #100000; $fatal("TIMEOUT"); end
 
 endmodule

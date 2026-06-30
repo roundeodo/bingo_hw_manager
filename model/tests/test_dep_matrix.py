@@ -126,3 +126,36 @@ class TestDepMatrix:
         state = dm.dump_state()
         assert "Row 0" in state
         assert "Row 1" in state
+
+
+class TestDepMatrixTagged:
+    """Identity-aware path (EnableTaggedDeps=1): a '+1' raised for one edge's tag
+    can only be drained by a consumer that expects that same tag."""
+
+    def test_stray_tag_does_not_satisfy_check(self):
+        dm = DepMatrix(3, 3)
+        # A stray producer raises counter[0][1] with tag 7 (meant for another edge).
+        dm.set_column(1, 0b001, tag=7)
+        # A consumer on row 0 waiting on col 1 with its OWN tag 2 must NOT pass.
+        assert dm.check_row(0, 0b010, tag=2) is False
+        # The consumer that actually owns tag 7 passes.
+        assert dm.check_row(0, 0b010, tag=7) is True
+
+    def test_two_edges_same_cell_independent(self):
+        dm = DepMatrix(3, 3)
+        # Two producers feed the SAME cell (row 0, col 1) with different tags.
+        dm.set_column(1, 0b001, tag=1)
+        dm.set_column(1, 0b001, tag=2)
+        # Each consumer drains only its own tag; clearing one leaves the other.
+        assert dm.check_row(0, 0b010, tag=1) is True
+        dm.clear_row(0, 0b010, tag=1)
+        assert dm.check_row(0, 0b010, tag=1) is False   # tag 1 drained
+        assert dm.check_row(0, 0b010, tag=2) is True    # tag 2 untouched
+
+    def test_tagged_and_untagged_paths_are_independent(self):
+        dm = DepMatrix(3, 3)
+        dm.set_column(0, 0b010)            # untagged increment, counter[1][0]
+        dm.set_column(0, 0b010, tag=5)     # tagged increment, tbl[1][0][5]
+        assert dm.check_row(1, 0b001) is True            # untagged path sees its count
+        assert dm.check_row(1, 0b001, tag=5) is True     # tagged path sees its tag
+        assert dm.check_row(1, 0b001, tag=9) is False    # unrelated tag absent

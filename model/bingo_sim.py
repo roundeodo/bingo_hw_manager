@@ -84,8 +84,9 @@ class BingoSimulator:
         self._all_task_ids: set[int] = set()
         self._completed_tasks: set[int] = set()
 
-        # In-flight H2H messages: (arrival_cycle, target_chiplet, source_core, target_cluster, dep_set_code)
-        self._h2h_inflight: list[tuple[int, int, int, int, int]] = []
+        # In-flight H2H messages:
+        #   (arrival_cycle, target_chiplet, source_core, target_cluster, dep_set_code, dep_set_tag)
+        self._h2h_inflight: list[tuple[int, int, int, int, int, Optional[int]]] = []
 
     def cerf_write_mask(self, chiplet_id: int, mask: int):
         """Write the full CERF bitmask for a specific chiplet."""
@@ -199,6 +200,7 @@ class BingoSimulator:
         target_chiplet = event.extra["target_chiplet"]
         target_cluster = event.extra["target_cluster"]
         dep_set_code = event.extra["dep_set_code"]
+        dep_set_tag = event.extra.get("dep_set_tag")
         source_core = event.extra["source_core"]
         broadcast = event.extra.get("broadcast", False)
 
@@ -207,18 +209,18 @@ class BingoSimulator:
         if broadcast:
             for cid in self.chiplets:
                 if cid != event.chiplet_id:
-                    self._h2h_inflight.append((arrival, cid, source_core, target_cluster, dep_set_code))
+                    self._h2h_inflight.append((arrival, cid, source_core, target_cluster, dep_set_code, dep_set_tag))
         else:
-            self._h2h_inflight.append((arrival, target_chiplet, source_core, target_cluster, dep_set_code))
+            self._h2h_inflight.append((arrival, target_chiplet, source_core, target_cluster, dep_set_code, dep_set_tag))
 
     def _deliver_h2h(self, cycle: int):
         """Deliver H2H messages that have arrived."""
         remaining = []
         for msg in self._h2h_inflight:
-            arrival, target_chip, source_core, target_cluster, dep_set_code = msg
+            arrival, target_chip, source_core, target_cluster, dep_set_code, dep_set_tag = msg
             if cycle >= arrival:
                 self.chiplets[target_chip].receive_chiplet_dep_set(
-                    source_core, target_cluster, dep_set_code
+                    source_core, target_cluster, dep_set_code, dep_set_tag
                 )
                 self.trace.record(SimEvent(
                     time=cycle,
