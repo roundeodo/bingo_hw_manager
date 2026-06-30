@@ -134,9 +134,9 @@ class AdaptiveSchedulingLoop:
         # -- Compile --------------------------------------------------
         with contextlib.redirect_stdout(io.StringIO()):
             dfg.bingo_compile_conditional_regions()
-            # Identity-aware deps (replaces the removed serialize mitigation):
-            # bound each cell to <= 2**4 concurrent edges, then allocate per-edge tags.
-            dfg.bingo_transform_dfg_spill_for_tag_capacity(tag_width=4)
+            # Identity-aware deps: allocate one per-edge tag per (R,C) cell after
+            # dep-info assignment (min-chain-cover reuses tags across non-overlapping
+            # edges, so it fits DepTagWidth without a separate bounding pass).
             dfg.bingo_transform_dfg_add_dummy_set_nodes()
             dfg.bingo_transform_dfg_add_dummy_check_nodes()
             dfg.bingo_assign_normal_node_dep_check_info()

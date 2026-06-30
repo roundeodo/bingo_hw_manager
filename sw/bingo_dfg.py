@@ -335,62 +335,6 @@ class BingoDFG(DiGraphWrapper[BingoNode]):
                     cur_node.dep_set_cluster_id = 0
                     cur_node.dep_set_chiplet_id = 0
 
-    def bingo_transform_dfg_spill_for_tag_capacity(self, tag_width: int = 3) -> None:
-        """Auto-spill: bound every dep-matrix cell to <= 2**tag_width
-        concurrently-live edges so the later tag allocator fits a SMALL fixed HW
-        tag width (keeps the scoreboard tiny; the heavy lifting is here in SW).
-
-        Run BEFORE the dummy-set / dummy-check passes and the dep-info
-        assignment, so the ordering edges this inserts become REAL, enforced
-        dependencies (a raw graph edge added after assignment would not gate
-        anything at runtime).
-
-        Mechanism (a windowed throttle, the register-allocation 'spill'): group
-        the original producer->consumer edges by physical cell
-        ``(consumer_chiplet, consumer_cluster, R, C)``; if a cell has more than
-        ``cap = 2**tag_width`` edges, add an ordering edge from edge[i-cap]'s
-        CONSUMER to edge[i]'s PRODUCER. Edge[i] then cannot set until edge[i-cap]
-        has been drained, so at most ``cap`` of the cell's edges are ever live at
-        once -- which is exactly the number of tags the allocator needs. A tag is
-        freed (by the consumer's clear) before the throttled producer sets, so
-        reuse is sound regardless of work-delay timing.
-
-        This is a HEURISTIC that only ADDS happens-before ordering: it can never
-        make tagging unsafe (the allocator's per-cell coloring + 2**tag_width
-        backstop remain the correctness guard); at worst an awkward graph leaves a
-        cell over capacity and the allocator raises, exactly as without spill.
-        Cost: less producer/consumer overlap (latency) and extra traffic on the
-        reverse cell (C, R); cycle-creating throttles are skipped.
-        """
-        cap = 1 << tag_width
-        topo = list(nx.topological_sort(self))
-        pos = {n: i for i, n in enumerate(topo)}
-
-        cells: dict = {}                      # (chip, cl, R, C) -> [(producer, consumer), ...]
-        for u, v in self.edges():
-            if u.node_type == "dummy" or v.node_type == "dummy":
-                continue
-            cells.setdefault((v.assigned_chiplet_id, v.assigned_cluster_id,
-                              v.assigned_core_id, u.assigned_core_id), []).append((u, v))
-
-        for key, edges in cells.items():
-            if len(edges) <= cap:
-                continue                       # cell already within tag budget
-            edges.sort(key=lambda e: (pos[e[0]], pos[e[1]]))
-            for i in range(cap, len(edges)):
-                donor_consumer = edges[i - cap][1]   # whose drain frees a tag
-                recv_producer  = edges[i][0]         # who must wait for that tag
-                if donor_consumer is recv_producer:
-                    continue
-                if self.has_edge(donor_consumer, recv_producer):
-                    continue
-                if nx.has_path(self, recv_producer, donor_consumer):
-                    continue                   # would create a cycle -> skip (backstop covers it)
-                self.bingo_add_edge(donor_consumer, recv_producer)
-                print(f"Spill throttle cell c{key[0]}.{key[1]}[{key[2]}][{key[3]}]: "
-                      f"{donor_consumer.node_name} -> {recv_producer.node_name} "
-                      f"(cap={cap})")
-
     def bingo_transform_dfg_allocate_dep_tags(self, tag_width: int = 3) -> None:
         """Assign per-edge identity tags (EnableTaggedDeps) so a consumer drains
         only ITS producer's increment, never a stray that happens to share the
@@ -411,10 +355,11 @@ class BingoDFG(DiGraphWrapper[BingoNode]):
         only fire after A has dispatched and freed the tag, regardless of work
         delays. Tags are assigned by greedy coloring that exploits this reuse.
 
-        ``tag_width`` is the fixed HW knob: a cell may hold at most ``2**tag_width``
-        concurrently-live edges. If coloring needs more, raise -- the compiler
-        must serialize (spill) to stay within the bound; we fail loudly rather
-        than silently reintroduce the aliasing bug.
+        ``tag_width`` is the fixed HW knob (``DepTagWidth``): a cell may hold at
+        most ``2**tag_width`` concurrently-live edges. If coloring needs more we
+        raise rather than silently reintroduce the aliasing bug -- the workload
+        must reduce a cell's concurrency (co-locate / serialize the offending
+        producers in placement) or ``DepTagWidth`` must be widened.
         """
         max_tags = 1 << tag_width
         topo = list(nx.topological_sort(self))
@@ -474,8 +419,9 @@ class BingoDFG(DiGraphWrapper[BingoNode]):
         #    which is perfect; by Dilworth the minimum #chains == the largest
         #    antichain == the max number of simultaneously-live edges. Greedy
         #    coloring is NOT optimal here, but min-chain-cover (bipartite matching)
-        #    is -- and it fits 2**tag_width exactly when spill has bounded the
-        #    antichain to that, so it never needs a stray extra tag.
+        #    is -- so it uses exactly the max antichain (the fewest tags any
+        #    correct assignment could), fitting 2**tag_width whenever the workload
+        #    keeps a cell's concurrency within that bound (it raises otherwise).
         for key, edges in cells.items():
             edges.sort(key=lambda e: (pos[e[0]], pos[e[1]]))
             n = len(edges)
@@ -517,8 +463,8 @@ class BingoDFG(DiGraphWrapper[BingoNode]):
             if n_chains > max_tags:
                 raise ValueError(
                     f"dep-tag allocation: cell {key} needs {n_chains} > {max_tags} "
-                    f"concurrent tags (tag_width={tag_width}); run "
-                    f"bingo_transform_dfg_spill_for_tag_capacity or widen tag_width.")
+                    f"concurrent tags (tag_width={tag_width}); reduce this cell's "
+                    f"concurrency in placement or widen DepTagWidth.")
             # 3. Stamp the tag on both endpoints of each edge.
             for i, (su, cv) in enumerate(edges):
                 su.dep_set_tag = tag_of[i]

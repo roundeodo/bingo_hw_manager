@@ -146,11 +146,14 @@ matrix, which then has *no* counter-sharing mitigation.)
   each edge a tag via an optimal **minimum chain-cover** of the happens-before
   partial order per cell (edges that can never be live at once share a tag). The
   order accounts for **same-core HOL** execution (each core dispatches its tasks in
-  topological order), which collapses same-core/diagonal cells to a chain.
-  `bingo_transform_dfg_spill_for_tag_capacity(W)` is an **auto-spill** pre-pass: a
-  windowed throttle that bounds each cell's concurrently-live edges to `2**W`, so
-  the small fixed hardware tag width always suffices. The compiler does the heavy
-  lifting; the hardware stays tiny.
+  topological order), which collapses same-core/diagonal cells to a single chain →
+  one tag. This reuse is what lets a tiny fixed `DepTagWidth` suffice with **no
+  separate concurrency-bounding pass**: if a cell ever needs more than `2**W`
+  simultaneously-live edges the allocator **raises** (a placement signal —
+  co-locate/serialize those producers, or widen `DepTagWidth`), rather than
+  silently aliasing. The compiler does the heavy lifting; the hardware stays tiny.
+  See [docs/identity_aware_dependency_matrix.md](docs/identity_aware_dependency_matrix.md)
+  for a worked tutorial.
 
 The tags ride the existing datapath: they live inside `dep_check_info`/
 `dep_set_info` in the descriptor, flow through the dep-matrix set arbiter/demux in
@@ -343,7 +346,7 @@ Two layers, both self-contained in this repo:
   - `test_single_chiplet.py`, `test_multi_chiplet.py` — pipeline / H2H integration
   - `test_cross_cluster_handoff_guard.py` — cross-cluster placement guard
   - `test_identity_stray_increment.py` — reproduces the counter-sharing hazard and shows the tag fix closes it
-  - `test_dep_tag_allocator.py` — the tag allocator (min-chain-cover) + auto-spill + capacity backstop
+  - `test_dep_tag_allocator.py` — the tag allocator (min-chain-cover): edge pairing, tag reuse, distinct tags for concurrent edges, capacity backstop
   - `test_dep_sync.py` — multi-cluster dispatch-before-producer gate (legacy hazard → tagged clean); also runnable as a CLI
 - **RTL testbench harness** (`test/tb_bingo_hw_manager_harness.svh`) with deadlock
   detection, dep-matrix monitoring, and trace logging, driving the testbenches:
@@ -351,7 +354,7 @@ Two layers, both self-contained in this repo:
   (CERF), `tb_bingo_hw_manager_dep_matrix` (matrix unit, legacy + tagged), and
   `tb_bingo_hw_manager_tagged` (identity-aware deps end-to-end, `EnableTaggedDeps=1`).
 - **DFG compiler** (`sw/bingo_dfg.py`) with automatic dummy task insertion and the
-  identity-aware tag allocator + auto-spill passes.
+  identity-aware per-edge tag allocator (min-chain-cover).
 
 ```bash
 # RTL: compile + simulate one testbench (requires QuestaSim)

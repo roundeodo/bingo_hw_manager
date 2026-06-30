@@ -110,12 +110,11 @@ def run_pattern(name, factory, kwargs, output_dir, emit_sv=False, verbose=True):
         print(f"  Pattern: {name}")
         print(f"{'='*60}")
 
-    # Build and compile DFG (identity-aware tagged deps: auto-spill bounds each
-    # cell, then allocate per-edge tags after dep-info assignment; replaces the
-    # removed legacy serialize_shared_counter_consumers mitigation).
+    # Build and compile DFG (identity-aware tagged deps: allocate one per-edge
+    # tag per (R,C) cell after dep-info assignment so a consumer drains only its
+    # own producer's increment; min-chain-cover reuse keeps it within DepTagWidth).
     dfg = factory(**kwargs)
     dfg.bingo_compile_conditional_regions()
-    dfg.bingo_transform_dfg_spill_for_tag_capacity(tag_width=4)
     dfg.bingo_transform_dfg_add_dummy_set_nodes()
     dfg.bingo_transform_dfg_add_dummy_check_nodes()
     dfg.bingo_assign_normal_node_dep_check_info()

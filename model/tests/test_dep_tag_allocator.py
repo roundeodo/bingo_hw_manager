@@ -126,7 +126,7 @@ def test_capacity_backstop_raises():
 
 def _parallel_cell_dfg(k):
     """k independent producer->consumer edges that all map to ONE cell (CONS,PROD)
-    -> k pairwise-overlapping live ranges -> needs k distinct tags without spill."""
+    -> k pairwise-overlapping live ranges -> needs k distinct tags."""
     d = BingoDFG()
     pairs = []
     def N(core, name):
@@ -138,10 +138,8 @@ def _parallel_cell_dfg(k):
     return d, pairs
 
 
-def _run_pipeline(d, tag_width, spill):
+def _run_pipeline(d, tag_width):
     d.bingo_compile_conditional_regions()
-    if spill:
-        d.bingo_transform_dfg_spill_for_tag_capacity(tag_width=tag_width)
     d.bingo_transform_dfg_add_dummy_set_nodes()
     d.bingo_transform_dfg_add_dummy_check_nodes()
     d.bingo_assign_normal_node_dep_check_info()
@@ -150,19 +148,21 @@ def _run_pipeline(d, tag_width, spill):
     return d
 
 
-def test_overflow_without_spill_raises():
+def test_overflow_raises():
     """6 independent edges on one cell need 6 tags; at tag_width=2 (4 tags) the
-    allocator must refuse rather than alias."""
+    allocator must refuse rather than alias (no auto-spill to fall back on --
+    a cell over its tag budget is a placement error the compiler reports)."""
     d, _ = _parallel_cell_dfg(6)
     with pytest.raises(ValueError):
-        _run_pipeline(d, tag_width=2, spill=False)
+        _run_pipeline(d, tag_width=2)
 
 
-def test_spill_fits_small_tag_width_and_runs_clean():
-    """With auto-spill the same 6-edge cell fits tag_width=2, and the model runs
-    to completion with every consumer dispatching only after its producer."""
+def test_parallel_cell_fits_and_runs_clean():
+    """6 independent edges on one cell get 6 distinct tags at tag_width=3 (8
+    available), and the model runs to completion with every consumer dispatching
+    only after its producer (each consumer drains exactly its own producer)."""
     d, pairs = _parallel_cell_dfg(6)
-    _run_pipeline(d, tag_width=2, spill=True)   # must NOT raise
+    _run_pipeline(d, tag_width=3)   # 8 tags >= 6 edges -> must NOT raise
 
     # Drive the behavioral model and check no dispatch-before-producer + no deadlock.
     def mask(cores):
@@ -186,7 +186,7 @@ def test_spill_fits_small_tag_width_and_runs_clean():
                                    random_seed=7))
     sim.load_tasks(per)
     res = sim.run(max_cycles=20000)
-    assert not res.deadlock_detected, "spill throttle must not deadlock"
+    assert not res.deadlock_detected, "tagged parallel cell must not deadlock"
     disp, done = {}, {}
     for e in res.trace.events:
         if e.event_type == "TASK_DISPATCHED":

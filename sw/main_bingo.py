@@ -284,12 +284,12 @@ bingo_dfg.bingo_add_edge(chip2_cluster0_core0_gemm_2, chip3_cluster0_core0_gemm_
 #                 chiplet3
 bingo_dfg.bingo_visualize_dfg("original_dfg.png")
 
-# Identity-aware deps: bound each dep-matrix cell to <= 2**TAG_W concurrently-live
-# edges (the auto-spill throttle), then allocate per-edge tags after dep-info
-# assignment. Replaces the removed legacy serialize_shared_counter_consumers
-# mitigation -- per-edge tags make a consumer drain only ITS producer's increment.
+# Identity-aware deps: allocate one per-edge tag per (R,C) dep-matrix cell after
+# dep-info assignment, so a consumer drains only ITS producer's increment. The
+# allocator's min-chain-cover reuses a tag whenever two edges on a cell can never
+# be live at once (happens-before / same-core order), keeping the count within
+# DepTagWidth without any separate concurrency-bounding pass.
 TAG_W = 4  # must match the hw_manager EnableTaggedDeps build's DepTagWidth
-bingo_dfg.bingo_transform_dfg_spill_for_tag_capacity(tag_width=TAG_W)
 # Transform the DFG to add dummy set nodes
 bingo_dfg.bingo_transform_dfg_add_dummy_set_nodes()
 bingo_dfg.bingo_visualize_dfg("dfg_after_add_dummy_dep_set_nodes.png")

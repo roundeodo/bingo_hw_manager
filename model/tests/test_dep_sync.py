@@ -9,7 +9,7 @@ aliasing).
 
 Two pipelines are exercised:
   * LEGACY (identity-blind dep matrix) — exhibits the hazard.
-  * TAGGED (auto-spill + per-edge tags) — must be clean (0 violations, no deadlock).
+  * TAGGED (per-edge tags) — must be clean (0 violations, no deadlock).
 
 Runs as a pytest (the two test_* functions below) and also standalone as a CLI:
     python3 model/tests/test_dep_sync.py [--seeds N] [--clusters M] [--tag-width W]
@@ -73,11 +73,9 @@ def build_stress_dfg(n_clusters=2):
 
 
 def compile_dfg(d, tagged, tag_width):
-    """Run the mini-compiler pipeline; with `tagged`, add auto-spill + per-edge
-    tag allocation (the identity-aware fix)."""
+    """Run the mini-compiler pipeline; with `tagged`, allocate per-edge tags
+    (the identity-aware fix)."""
     d.bingo_compile_conditional_regions()
-    if tagged:
-        d.bingo_transform_dfg_spill_for_tag_capacity(tag_width=tag_width)
     d.bingo_transform_dfg_add_dummy_set_nodes()
     d.bingo_transform_dfg_add_dummy_check_nodes()
     d.bingo_assign_normal_node_dep_check_info()
@@ -156,7 +154,7 @@ def test_legacy_pipeline_exhibits_hazard():
 
 
 def test_tagged_pipeline_is_clean():
-    """The identity-aware pipeline (auto-spill + per-edge tags) must drive ALL
+    """The identity-aware pipeline (per-edge tags) must drive ALL
     dispatch-before-producer violations to zero and never deadlock."""
     for n_clusters in (1, 2, 3):
         cross, same, deadlocks, _name = analyze(n_clusters=n_clusters, tagged=True, seeds=20)
@@ -194,7 +192,7 @@ def main():
         return
 
     tc, ts, td, tn = analyze(args.clusters, tagged=True, tag_width=args.tag_width, seeds=args.seeds)
-    _report(f"TAGGED (spill + tags, W={args.tag_width}) | clusters={args.clusters} seeds={args.seeds}",
+    _report(f"TAGGED (tags, W={args.tag_width}) | clusters={args.clusters} seeds={args.seeds}",
             tc, ts, td, tn)
     if len(tc) + len(ts) + td:
         print("\nFAIL: identity-aware pipeline still has hazard(s).")
