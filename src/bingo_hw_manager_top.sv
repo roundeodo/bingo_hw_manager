@@ -18,7 +18,7 @@ module bingo_hw_manager_top #(
     // Opt-in identity-aware dependency tracking (per-edge tags). Default OFF =
     // legacy identity-blind dep matrix, byte-identical behavior. When 1, the
     // mini-compiler's per-edge tags are plumbed to the tagged dep-matrix scoreboard.
-    parameter bit          EnableTaggedDeps = 1'b0,
+    parameter bit          EnableTaggedDeps = 1'b1,
     parameter int unsigned DepTagWidth = 3,
     // AXI interface types
     // The task queue holds tasks to be scheduled to the devices
