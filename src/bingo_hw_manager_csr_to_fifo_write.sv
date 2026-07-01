@@ -24,5 +24,4 @@ module bingo_hw_manager_csr_to_fifo_write #(
     assign fifo_data_o = csr_req_data_i;
     assign fifo_data_valid_o = csr_req_valid_i;
     assign csr_req_ready_o = fifo_data_ready_i;
-    assign csr_rsp_valid_o = csr_req_valid_i && fifo_data_ready_i;
 endmodule

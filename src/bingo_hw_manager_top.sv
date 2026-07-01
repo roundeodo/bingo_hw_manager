@@ -526,8 +526,8 @@ module bingo_hw_manager_top #(
         );
         // Tie off the unused master interface signals
         assign task_queue_axi_lite_req_o = '0;
-        assign reset_start_o = 1'b0;
-        assign reset_start_enable_o = 1'b0;
+        assign bingo_hw_manager_reset_start_o = '0;
+        assign bingo_hw_manager_reset_start_en_o = 1'b0;
     end
     else begin : gen_bingo_hw_manager_task_queue_master
         // AXI Lite Master Task Queue
