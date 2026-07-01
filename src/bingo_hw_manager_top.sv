@@ -15,6 +15,13 @@ module bingo_hw_manager_top #(
     parameter int unsigned NUM_CLUSTERS_PER_CHIPLET = 2,
     parameter int unsigned ChipIdWidth = 8,
     parameter int unsigned TaskIdWidth = 12,
+    // Identity-aware dependency tracking (per-edge tags), DEFAULT ON. The
+    // mini-compiler's per-edge tags are plumbed to the tagged dep-matrix scoreboard
+    // so a consumer drains only ITS producer's increment. Set to 0 for the legacy
+    // identity-blind matrix (no counter-sharing mitigation; the SW serialize
+    // workaround has been removed -- tags supersede it).
+    parameter bit          EnableTaggedDeps = 1'b1,
+    parameter int unsigned DepTagWidth = 4,
     // AXI interface types
     // The task queue holds tasks to be scheduled to the devices
     // Host writes the task queue via 64bit AXI Lite
@@ -137,12 +144,17 @@ module bingo_hw_manager_top #(
     typedef logic [cf_math_pkg::idx_width(NUM_CORES_PER_CLUSTER)-1:0   ] bingo_hw_manager_assigned_core_id_t;
     // Dependency check info struct
     typedef logic [NUM_CORES_PER_CLUSTER-1:0]            bingo_hw_manager_dep_code_t;
+    // Per-edge identity tag (EnableTaggedDeps). Carried alongside the dep code so
+    // it flows through every existing dep_check_info / dep_set_info copy unchanged.
+    typedef logic [DepTagWidth-1:0]                      bingo_hw_manager_dep_tag_t;
     typedef struct packed{
+        bingo_hw_manager_dep_tag_t                   dep_check_tag;
         bingo_hw_manager_dep_code_t                  dep_check_code;
         logic                                        dep_check_en;
     } bingo_hw_manager_dep_check_info_t;
     // Dependency set info struct
     typedef struct packed{
+        bingo_hw_manager_dep_tag_t                   dep_set_tag;
         bingo_hw_manager_dep_code_t                  dep_set_code;
         bingo_hw_manager_assigned_cluster_id_t       dep_set_cluster_id;
         bingo_hw_manager_assigned_chiplet_id_t       dep_set_chiplet_id;
@@ -215,6 +227,7 @@ module bingo_hw_manager_top #(
     typedef struct packed{
         bingo_hw_manager_assigned_cluster_id_t     dep_matrix_id;
         bingo_hw_manager_assigned_core_id_t        dep_matrix_col;
+        bingo_hw_manager_dep_tag_t                 dep_matrix_set_tag;
         bingo_hw_manager_dep_code_t                dep_set_code;
     } bingo_hw_manager_dep_matrix_set_meta_t;
 
@@ -340,9 +353,11 @@ module bingo_hw_manager_top #(
     logic [NUM_CLUSTERS_PER_CHIPLET-1:0][NUM_CORES_PER_CLUSTER-1:0]            dep_check_valid;
     logic [NUM_CLUSTERS_PER_CHIPLET-1:0][NUM_CORES_PER_CLUSTER-1:0]            dep_check_result;
     dep_check_code_t [NUM_CLUSTERS_PER_CHIPLET-1:0][NUM_CORES_PER_CLUSTER-1:0] dep_check_code;
+    bingo_hw_manager_dep_tag_t [NUM_CLUSTERS_PER_CHIPLET-1:0][NUM_CORES_PER_CLUSTER-1:0] dep_check_tag;
     logic [NUM_CLUSTERS_PER_CHIPLET-1:0][NUM_CORES_PER_CLUSTER-1:0]            dep_set_valid;
     logic [NUM_CLUSTERS_PER_CHIPLET-1:0][NUM_CORES_PER_CLUSTER-1:0]            dep_set_ready;
     dep_set_code_t [NUM_CLUSTERS_PER_CHIPLET-1:0][NUM_CORES_PER_CLUSTER-1:0]   dep_set_code;
+    bingo_hw_manager_dep_tag_t [NUM_CLUSTERS_PER_CHIPLET-1:0][NUM_CORES_PER_CLUSTER-1:0] dep_set_tag;
 
     ///////////////////////////////////////
     // Stream Arbiter Dep Matrix Set
@@ -746,16 +761,20 @@ module bingo_hw_manager_top #(
     for (genvar cluster = 0; cluster < NUM_CLUSTERS_PER_CHIPLET; cluster = cluster + 1) begin: gen_dep_matrix
         bingo_hw_manager_dep_matrix #(
             .DEP_MATRIX_ROWS(NUM_CORES_PER_CLUSTER),
-            .DEP_MATRIX_COLS(NUM_CORES_PER_CLUSTER)
+            .DEP_MATRIX_COLS(NUM_CORES_PER_CLUSTER),
+            .EnableTaggedDeps(EnableTaggedDeps),
+            .TagWidth(DepTagWidth)
         ) i_dep_matrix (
             .clk_i             (clk_i                    ),
             .rst_ni            (rst_ni                   ),
             .dep_check_valid_i (dep_check_valid[cluster] ),
             .dep_check_code_i  (dep_check_code[cluster]  ),
+            .dep_check_tag_i   (dep_check_tag[cluster]   ),
             .dep_check_result_o(dep_check_result[cluster]),
             .dep_set_valid_i   (dep_set_valid[cluster]   ),
             .dep_set_ready_o   (dep_set_ready[cluster]   ),
-            .dep_set_code_i    (dep_set_code[cluster]    )
+            .dep_set_code_i    (dep_set_code[cluster]    ),
+            .dep_set_tag_i     (dep_set_tag[cluster]     )
         );
     end
 
@@ -765,6 +784,7 @@ module bingo_hw_manager_top #(
                 dep_check_valid[cluster][core] = demux_dep_matrix_oup_valid[core][cluster];
                 demux_dep_matrix_oup_ready[core][cluster] = dep_check_result[cluster][core];
                 dep_check_code[cluster][core] = waiting_dep_check_task_desc[core].dep_check_info.dep_check_code;
+                dep_check_tag[cluster][core] = waiting_dep_check_task_desc[core].dep_check_info.dep_check_tag;
             end
         end
     end
@@ -793,6 +813,7 @@ module bingo_hw_manager_top #(
                     stream_arbiter_inp_idx = core + cluster * NUM_CORES_PER_CLUSTER;
                     stream_arbiter_dep_matrix_set_inp_data[stream_arbiter_inp_idx].dep_matrix_id = checkout_queue_data_out[core][cluster].dep_set_info.dep_set_cluster_id;
                     stream_arbiter_dep_matrix_set_inp_data[stream_arbiter_inp_idx].dep_matrix_col= core;
+                    stream_arbiter_dep_matrix_set_inp_data[stream_arbiter_inp_idx].dep_matrix_set_tag = checkout_queue_data_out[core][cluster].dep_set_info.dep_set_tag;
                     stream_arbiter_dep_matrix_set_inp_data[stream_arbiter_inp_idx].dep_set_code  = checkout_queue_data_out[core][cluster].dep_set_info.dep_set_code;
                     // Handshake from the checkout demux and the per-(core,cluster) done queue
                     // Dummy set: no done queue check needed
@@ -806,6 +827,7 @@ module bingo_hw_manager_top #(
         // For Chiplet Set Queue
         stream_arbiter_dep_matrix_set_inp_data[NUM_CORES_PER_CLUSTER * NUM_CLUSTERS_PER_CHIPLET].dep_matrix_id  = cur_chiplet_done_queue_task_desc.dep_set_info.dep_set_cluster_id;
         stream_arbiter_dep_matrix_set_inp_data[NUM_CORES_PER_CLUSTER * NUM_CLUSTERS_PER_CHIPLET].dep_matrix_col = cur_chiplet_done_queue_task_desc.assigned_core_id;
+        stream_arbiter_dep_matrix_set_inp_data[NUM_CORES_PER_CLUSTER * NUM_CLUSTERS_PER_CHIPLET].dep_matrix_set_tag = cur_chiplet_done_queue_task_desc.dep_set_info.dep_set_tag;
         stream_arbiter_dep_matrix_set_inp_data[NUM_CORES_PER_CLUSTER * NUM_CLUSTERS_PER_CHIPLET].dep_set_code   = cur_chiplet_done_queue_task_desc.dep_set_info.dep_set_code;
         stream_arbiter_dep_matrix_set_inp_valid[NUM_CORES_PER_CLUSTER * NUM_CLUSTERS_PER_CHIPLET] = !chiplet_done_queue_mbox_empty;
         stream_arbiter_dep_matrix_set_oup_ready = stream_demux_set_dep_matrix_cluster_id_inp_ready;
@@ -849,6 +871,7 @@ module bingo_hw_manager_top #(
                 dep_set_valid[cluster][core] = stream_demux_set_dep_matrix_core_id_oup_valid[cluster][core];
                 stream_demux_set_dep_matrix_core_id_oup_ready[cluster][core] = dep_set_ready[cluster][core];
                 dep_set_code[cluster][core] = stream_arbiter_dep_matrix_set_oup_data.dep_set_code;
+                dep_set_tag[cluster][core] = stream_arbiter_dep_matrix_set_oup_data.dep_matrix_set_tag;
             end
         end        
     end

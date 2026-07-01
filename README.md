@@ -1,6 +1,6 @@
 # Bingo Hardware Task Manager
 
-A hardware task scheduler for heterogeneous multi-core, multi-chiplet SoCs. It accepts a stream of task descriptors with encoded dependency information, resolves inter-task dependencies through a counter-based dependency matrix, and dispatches ready tasks to execution cores.
+A hardware task scheduler for heterogeneous multi-core, multi-chiplet SoCs. It accepts a stream of task descriptors with encoded dependency information, resolves inter-task dependencies through a per-cluster dependency matrix, and dispatches ready tasks to execution cores. The dependency matrix is an **identity-aware tagged scoreboard** by default (`EnableTaggedDeps=1`) — a consumer waits for *its* producer rather than any signal from a producer core — with a legacy identity-blind counter mode (`EnableTaggedDeps=0`) still selectable. See **Identity-Aware Dependencies**.
 
 **Authors:** Fanchen Kong, Xiaoling Yi, Yunhao Deng  
 **Affiliation:** KU Leuven (MICAS)
@@ -78,6 +78,12 @@ Each task is a 64-bit packed struct pushed into the task queue:
 | `dep_set_chiplet_id` | 8 | Target chiplet for dep_set |
 | `dep_set_cluster_id` | log2(clusters) | Target cluster for dep_set |
 | `dep_set_code` | N_CORES | Bitmask: which core rows to signal in dep matrix |
+| `dep_check_tag` | `DepTagWidth` | Per-edge identity tag this check expects (only when `EnableTaggedDeps=1`) |
+| `dep_set_tag` | `DepTagWidth` | Per-edge identity tag this set carries (only when `EnableTaggedDeps=1`) |
+
+The two tag fields are carved from the descriptor's reserved bits and are `'0`
+when identity-aware tracking is disabled (the default), so the 64-bit layout and
+behavior are unchanged. See **Identity-Aware Dependencies** below.
 
 ## Task Lifecycle
 
@@ -113,6 +119,46 @@ Row 2 (co2)  [cnt]     [cnt]     [cnt]    <- what core 2 waits for
 - `clear_row(row, mask)`: Decrement `counter[row][c]` by 1 for each column `c` in the mask.
 
 This design eliminates the deadlock caused by the old 1-bit overlap detection, where a second `set` to an already-set bit was rejected, creating circular backpressure through the done queue.
+
+## Identity-Aware Dependencies (per-edge tags — the default)
+
+A plain counter cell is **identity-blind**: a `counter[row][col] >= 1` check knows
+the *number* of pending signals from a producer core, not *which* producer raised
+them. Because one cell is shared by **every** producer→consumer edge that maps to
+the same `(consumer_core, producer_core)` pair, a consumer can drain a stray
+increment meant for a different consumer and dispatch **before its own input is
+ready** (the counter-sharing hazard; see `COUNTER_SHARING_BUG.md`).
+
+The fix is **per-edge identity tags**, the **default** (`EnableTaggedDeps=1`). It
+fully replaces the old `serialize_shared_counter_consumers` software mitigation,
+which only partially ordered producers and could break same-core data edges — that
+pass has been **removed**. (Set `EnableTaggedDeps=0` for the legacy identity-blind
+matrix, which then has *no* counter-sharing mitigation.)
+
+- **Hardware (`EnableTaggedDeps=1`):** each cell becomes a `2**DepTagWidth`
+  **presence-bit scoreboard**. A `set` writes the bit at its `dep_set_tag`; a
+  `check` passes only on its own `dep_check_tag`; `clear` clears that one bit. A
+  stray increment carries a tag no consumer expects, so it can never satisfy an
+  unrelated check. `DepTagWidth=4` (default) sizes the scoreboard to a layer's
+  natural concurrency; the legacy/tagged paths are selected by a conditional
+  `generate`, so the disabled path is pruned.
+- **Software (mini-compiler):** `bingo_transform_dfg_allocate_dep_tags(W)` assigns
+  each edge a tag via an optimal **minimum chain-cover** of the happens-before
+  partial order per cell (edges that can never be live at once share a tag). The
+  order accounts for **same-core HOL** execution (each core dispatches its tasks in
+  topological order), which collapses same-core/diagonal cells to a single chain →
+  one tag. This reuse is what lets a tiny fixed `DepTagWidth` suffice with **no
+  separate concurrency-bounding pass**: if a cell ever needs more than `2**W`
+  simultaneously-live edges the allocator **raises** (a placement signal —
+  co-locate/serialize those producers, or widen `DepTagWidth`), rather than
+  silently aliasing. The compiler does the heavy lifting; the hardware stays tiny.
+  See [docs/identity_aware_dependency_matrix.md](docs/identity_aware_dependency_matrix.md)
+  for a worked tutorial.
+
+The tags ride the existing datapath: they live inside `dep_check_info`/
+`dep_set_info` in the descriptor, flow through the dep-matrix set arbiter/demux in
+the `dep_matrix_set_meta` struct, and are checked by the per-core
+`dep_check_manager`. End-to-end RTL test: `test/tb_bingo_hw_manager_tagged.sv`.
 
 ## Per-(Core, Cluster) Done Queues
 
@@ -153,7 +199,8 @@ bingo_hw_manager_top
  |    +-- stream_demux (route to cluster, ready+checkout path)
  |
  +-- Per-Cluster Dep Matrix (NUM_CLUSTERS_PER_CHIPLET instances)
- |    +-- dep_matrix (counter-based, 8-bit cells)
+ |    +-- dep_matrix (tagged presence-bit scoreboard by default; legacy
+ |        counter-based 8-bit cells when EnableTaggedDeps=0)
  |
  +-- Per-(Core, Cluster) Queues (N_CORES x N_CLUSTERS instances each)
  |    +-- Ready Queue: read_mailbox or fifo_v3
@@ -182,6 +229,8 @@ bingo_hw_manager_top
 |-----------|---------|-------------|
 | `NUM_CORES_PER_CLUSTER` | 4 | Execution cores per cluster |
 | `NUM_CLUSTERS_PER_CHIPLET` | 2 | Clusters per chiplet |
+| `EnableTaggedDeps` | 1 | 1: identity-aware tagged scoreboard (default), 0: legacy counter matrix |
+| `DepTagWidth` | 4 | Tag width (cell holds up to `2**DepTagWidth` concurrent edges) |
 | `TaskIdWidth` | 12 | Task ID width (max 4096 tasks) |
 | `ChipIdWidth` | 8 | Chiplet ID width (max 256 chiplets) |
 | `HostAxiLiteAddrWidth` | 48 | Host-side AXI address width |
@@ -279,7 +328,7 @@ Evaluated via cycle-accurate Python simulator (`scripts/eval_darts.py`):
 | 0 | `bingo_hw_manager_write_mailbox.sv` | AXI-Lite-to-FIFO write bridge |
 | 0 | `bingo_hw_manager_task_queue_master.sv` | AXI-Lite master for task fetching |
 | 0 | `bingo_hw_manager_csr_to_fifo*.sv` | CSR interface adapters |
-| 1 | `bingo_hw_manager_dep_matrix.sv` | Counter-based dependency matrix |
+| 1 | `bingo_hw_manager_dep_matrix.sv` | Dependency matrix: counter-based, plus opt-in tagged presence-bit scoreboard (`EnableTaggedDeps`) |
 | 1 | `bingo_hw_manager_chiplet_dep_set.sv` | H2H AXI-Lite master |
 | 1 | `bingo_hw_manager_dep_check_manager.sv` | Dependency check FSM |
 | 1 | `bingo_hw_manager_pm.sv` | Power manager |
@@ -289,25 +338,36 @@ Evaluated via cycle-accurate Python simulator (`scripts/eval_darts.py`):
 
 ## Testing
 
-The test infrastructure includes:
+Two layers, both self-contained in this repo:
 
-- **RTL testbench harness** (`test/tb_bingo_hw_manager_harness.svh`) with deadlock detection, counter monitoring, and structured trace logging
-- **9 structured DFG patterns:** serial chain, parallel fork-join, double buffer, diamond, stacked GEMM, multi-chiplet chain
-- **44 random DAG tests:** 10-40 tasks, 1-4 chiplets, sparse/dense edge configurations
-- **Cycle-accurate Python model** (`model/`) mirroring the RTL pipeline behavior
-- **DFG compiler** (`sw/bingo_dfg.py`) with automatic dummy task insertion
+- **Cycle-accurate Python model** (`model/`) mirroring the RTL pipeline, with a
+  pytest suite in `model/tests/`:
+  - `test_dep_matrix.py` — the matrix primitive (legacy counter + tagged scoreboard)
+  - `test_single_chiplet.py`, `test_multi_chiplet.py` — pipeline / H2H integration
+  - `test_cross_cluster_handoff_guard.py` — cross-cluster placement guard
+  - `test_identity_stray_increment.py` — reproduces the counter-sharing hazard and shows the tag fix closes it
+  - `test_dep_tag_allocator.py` — the tag allocator (min-chain-cover): edge pairing, tag reuse, distinct tags for concurrent edges, capacity backstop
+  - `test_dep_sync.py` — multi-cluster dispatch-before-producer gate (legacy hazard → tagged clean); also runnable as a CLI
+- **RTL testbench harness** (`test/tb_bingo_hw_manager_harness.svh`) with deadlock
+  detection, dep-matrix monitoring, and trace logging, driving the testbenches:
+  `tb_bingo_hw_manager_top` (multi-chiplet), `tb_bingo_hw_manager_cerf_basic/skip`
+  (CERF), `tb_bingo_hw_manager_dep_matrix` (matrix unit, legacy + tagged), and
+  `tb_bingo_hw_manager_tagged` (identity-aware deps end-to-end, `EnableTaggedDeps=1`).
+- **DFG compiler** (`sw/bingo_dfg.py`) with automatic dummy task insertion and the
+  identity-aware per-edge tag allocator (min-chain-cover).
 
 ```bash
-# Compile and simulate (requires Questa)
-make clean && make compile.log
-cd build && echo "run -all" | vsim -sv_seed 0 tb_bingo_hw_manager_top -t 1ns -voptargs="+acc"
+# RTL: compile + simulate one testbench (requires QuestaSim)
+make compile.log
+make sim-bingo_hw_manager_top.log           # or _tagged / _dep_matrix / _cerf_basic / _cerf_skip
 
-# Run Python model tests
-source ../.venv/bin/activate
-python3 scripts/run_all_tests.py --stress 200
+# Python model + compiler tests
+make test-model                             # python3 -m pytest model/tests/
+
+# Dependency-sync gate as a standalone report
+python3 model/tests/test_dep_sync.py --seeds 20 --clusters 2
 ```
 
-**Test results:**
-- RTL: 66/66 pass (includes CERF conditional tests) with zero deadlocks
-- Python model: 68/68 pass (20 structured + 48 random stress)
-- Evaluation: 4 experiment suites, all deadlock-free (CSV results in `eval_results/`)
+All Python model tests and all RTL testbenches pass; with `EnableTaggedDeps=0` the
+RTL is byte-identical to the legacy matrix, and `EnableTaggedDeps=1` drives the
+dispatch-before-producer hazard to zero.
