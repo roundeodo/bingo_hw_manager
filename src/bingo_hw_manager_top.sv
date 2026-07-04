@@ -13,6 +13,10 @@ module bingo_hw_manager_top #(
     parameter int unsigned TASK_QUEUE_TYPE = 1,                     // 1: AXI Lite Master 0: Default AXI Lite Slave
     parameter int unsigned NUM_CORES_PER_CLUSTER = 4,
     parameter int unsigned NUM_CLUSTERS_PER_CHIPLET = 2,
+    // Dedicated host DVFS doorbell bit inside the shared CLINT MSIP word. Injected from
+    // the HeMAiA level (occamygen hw_manager_ipi_idx) and forwarded to the PM so it is
+    // never hardcoded; must match HW_MANAGER_DVFS_MSIP_BIT / occamy_soc.sv ipi_i.
+    parameter int unsigned HOST_DVFS_MSIP_BIT = 3,
     parameter int unsigned ChipIdWidth = 8,
     parameter int unsigned TaskIdWidth = 12,
     // Identity-aware dependency tracking (per-edge tags), DEFAULT ON. The
@@ -1262,6 +1266,7 @@ module bingo_hw_manager_top #(
         .NUM_CLUSTERS_PER_CHIPLET ( NUM_CLUSTERS_PER_CHIPLET          ),
         .NUM_CORES_PER_CLUSTER    ( NUM_CORES_PER_CLUSTER             ),
         .CfgBusWidth              ( DeviceAxiLiteDataWidth            ),
+        .HOST_DVFS_MSIP_BIT       ( HOST_DVFS_MSIP_BIT                ),
         .req_lite_t               ( host_axi_lite_req_t               ),
         .resp_lite_t              ( host_axi_lite_resp_t              ),
         .addr_t                   ( host_axi_lite_addr_t              ),

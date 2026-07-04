@@ -21,6 +21,10 @@ module bingo_hw_manager_pm #(
     parameter int unsigned NUM_CLUSTERS_PER_CHIPLET = 4,
     parameter int unsigned NUM_CORES_PER_CLUSTER = 8,
     parameter int unsigned CfgBusWidth = 32,
+    // Dedicated host DVFS doorbell bit inside the shared CLINT MSIP word. Injected from
+    // the HeMAiA level (occamygen hw_manager_ipi_idx) so it tracks the hart count instead
+    // of being hardcoded; must match HW_MANAGER_DVFS_MSIP_BIT / occamy_soc.sv ipi_i.
+    parameter int unsigned HOST_DVFS_MSIP_BIT = 3,
     parameter type     req_lite_t   = logic,
     parameter type     resp_lite_t  = logic,
     parameter type     addr_t       = logic,
@@ -62,9 +66,7 @@ module bingo_hw_manager_pm #(
     localparam int unsigned MAX_DOMAINS = 32;
     localparam int unsigned OFFSET_CLOCK_VALID = 32'h04;
     localparam int unsigned OFFSET_CLOCK_DIVISION_BASE = 32'h08;
-    // The dedicated host DVFS doorbell bit inside the shared 32-bit CLINT MSIP word.
-    // Must match HOST_DVFS_MSIP_BIT / the extra CLINT target added at the HeMAiA level.
-    localparam int unsigned HOST_DVFS_MSIP_BIT = 3;
+    // HOST_DVFS_MSIP_BIT is now a module parameter (injected from the HeMAiA level).
     // DVFS_REQUEST field layout (must match occamy_quad_periph DVFS_REQUEST register)
     localparam int unsigned DVFS_REQ_PENDING_BIT = 0;
     localparam int unsigned DVFS_REQ_DIR_BIT     = 1;  // 1 = raise (chip busy), 0 = lower (chip idle)
