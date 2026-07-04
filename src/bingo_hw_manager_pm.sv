@@ -455,7 +455,7 @@ module bingo_hw_manager_pm #(
     // Map internal bus signals to output struct
     always_comb begin
         pm_axi_lite_req_o = '0;
-        
+
         pm_axi_lite_req_o.aw.addr  = bus_addr;
         pm_axi_lite_req_o.aw.prot  = 3'b000;
         pm_axi_lite_req_o.aw_valid = bus_aw_valid;
@@ -472,5 +472,27 @@ module bingo_hw_manager_pm #(
         pm_axi_lite_req_o.ar_valid = bus_ar_valid;
         pm_axi_lite_req_o.r_ready  = bus_r_ready;
     end
+
+    // -------------------------------------------------------------------------
+    // DVFS voltage-safety assertion
+    // -------------------------------------------------------------------------
+    // Safety property: in DVFS mode the PM must NEVER autonomously drive the on-chip
+    // clk/rst controller. Frequency there must be coordinated with the external PMIC
+    // voltage by the host ISR (raise: V then F; lower: F then V), so if the PM changed
+    // frequency on its own it could run the clock fast at low Vdd -> setup-timing
+    // failure on silicon. In DVFS mode the PM may only ring the host doorbell via the
+    // READ_MSIP_*/WRITE_MSIP_* states; it must stay out of the WRITE_FREQ_*/WRITE_VALID_*
+    // (clk/rst-write) states. This catches a future FSM refactor that breaks the mode
+    // gating. The V/F ordering contract itself is enforced in software (host has no
+    // voltage feedback in RTL)
+    // synopsys translate_off
+`ifndef SYNTHESIS
+    assert property (@(posedge clk_i) disable iff (!rst_ni)
+        pm_mode_i[0] |-> !(state_q inside {WRITE_FREQ_AW, WRITE_FREQ_W,
+                                           WRITE_VALID_AW, WRITE_VALID_W}))
+    else $error("bingo_hw_manager_pm: entered a clk/rst-write state in DVFS mode ",
+                "(the host, not the PM, must scale frequency under voltage coordination)");
+`endif
+    // synopsys translate_on
 
 endmodule
