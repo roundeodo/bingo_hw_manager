@@ -13,6 +13,10 @@ module bingo_hw_manager_top #(
     parameter int unsigned TASK_QUEUE_TYPE = 1,                     // 1: AXI Lite Master 0: Default AXI Lite Slave
     parameter int unsigned NUM_CORES_PER_CLUSTER = 4,
     parameter int unsigned NUM_CLUSTERS_PER_CHIPLET = 2,
+    // Dedicated host DVFS doorbell bit inside the shared CLINT MSIP word. Injected from
+    // the HeMAiA level (occamygen hw_manager_ipi_idx) and forwarded to the PM so it is
+    // never hardcoded; must match HW_MANAGER_DVFS_MSIP_BIT / occamy_soc.sv ipi_i.
+    parameter int unsigned HOST_DVFS_MSIP_BIT = 3,
     parameter int unsigned ChipIdWidth = 8,
     parameter int unsigned TaskIdWidth = 12,
     // Identity-aware dependency tracking (per-edge tags), DEFAULT ON. The
@@ -116,6 +120,11 @@ module bingo_hw_manager_top #(
     input device_axi_lite_data_t                bingo_hw_manager_normal_power_level_i,
     input device_axi_lite_addr_t                bingo_hw_manager_pm_base_addr_i,
     input device_axi_lite_data_t                [NUM_CORES_PER_CLUSTER-1:0][NUM_CLUSTERS_PER_CHIPLET-1:0]    bingo_hw_manager_core_power_domain_i,
+    // DVFS: mode select, CLINT doorbell address, host ack, and published request
+    input  device_axi_lite_data_t               bingo_hw_manager_pm_mode_i,
+    input  device_axi_lite_addr_t               bingo_hw_manager_dvfs_clint_msip_addr_i,
+    input  device_axi_lite_data_t               bingo_hw_manager_dvfs_ack_i,
+    output device_axi_lite_data_t               bingo_hw_manager_dvfs_request_o,
     // AXI Lite Master Interface
     output host_axi_lite_req_t                  pm_axi_lite_req_o,
     input  host_axi_lite_resp_t                 pm_axi_lite_resp_i,
@@ -1257,6 +1266,7 @@ module bingo_hw_manager_top #(
         .NUM_CLUSTERS_PER_CHIPLET ( NUM_CLUSTERS_PER_CHIPLET          ),
         .NUM_CORES_PER_CLUSTER    ( NUM_CORES_PER_CLUSTER             ),
         .CfgBusWidth              ( DeviceAxiLiteDataWidth            ),
+        .HOST_DVFS_MSIP_BIT       ( HOST_DVFS_MSIP_BIT                ),
         .req_lite_t               ( host_axi_lite_req_t               ),
         .resp_lite_t              ( host_axi_lite_resp_t              ),
         .addr_t                   ( host_axi_lite_addr_t              ),
@@ -1272,6 +1282,11 @@ module bingo_hw_manager_top #(
         .core_power_domain_i   ( bingo_hw_manager_core_power_domain_i   ),
         // Internal Core status
         .core_status_waiting_task_i ( core_status_waiting_task         ),
+        // DVFS mode: monitor + notify host
+        .pm_mode_i             ( bingo_hw_manager_pm_mode_i             ),
+        .dvfs_clint_msip_addr_i( bingo_hw_manager_dvfs_clint_msip_addr_i),
+        .dvfs_ack_i            ( bingo_hw_manager_dvfs_ack_i            ),
+        .dvfs_request_o        ( bingo_hw_manager_dvfs_request_o        ),
         // Interface to Host AXI Lite
         .pm_axi_lite_req_o     (pm_axi_lite_req_o                      ),
         .pm_axi_lite_resp_i    (pm_axi_lite_resp_i                     )
