@@ -31,6 +31,13 @@ sources:
   # Level 2
   - src/bingo_hw_manager_top.sv                # Top-level module
   - target: test
+    # Expose the test/ dir as an include path so the tb `include "..._harness.svh"
+    # (and the tb_stimulus_*.svh) resolve when this `test` target is pulled into an
+    # external bender compile (e.g. HeMAiA's system sim uses `-t test`). Without this,
+    # only compile_vsim.sh's shell-glob added the incdir, so external consumers hit
+    # Error-[SFCOR] on the harness include.
+    include_dirs:
+      - test
     files:
       - test/tb_bingo_hw_manager_dep_matrix.sv
       - test/tb_bingo_hw_manager_top.sv
