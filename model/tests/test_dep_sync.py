@@ -1,17 +1,15 @@
-"""Dependency-sync gate: dispatch-before-producer hazards, legacy vs identity-aware.
+"""Dependency-sync gate: dispatch-before-producer hazards under identity-aware tags.
 
-Builds a synthetic multi-cluster stress DFG that reproduces the counter-sharing
-hazard, runs the full mini-compiler pipeline, then drives the behavioral model
-over several seeded timings and reports every task that DISPATCHES before a true
-DFG predecessor has COMPLETED. Violations are split into CROSS-cluster (the
-unqualified-column hazard) and SAME-cluster (within-cluster shared-counter
-aliasing).
+Builds a synthetic multi-cluster stress DFG that used to reproduce the
+counter-sharing hazard of the removed identity-blind matrix, runs the full
+mini-compiler pipeline (including the per-edge tag allocator), then drives the
+behavioral model over several seeded timings and reports every task that
+DISPATCHES before a true DFG predecessor has COMPLETED. Violations are split
+into CROSS-cluster (the unqualified-column hazard) and SAME-cluster
+(within-cluster shared-cell aliasing). The tagged pipeline must be clean
+(0 violations, no deadlock).
 
-Two pipelines are exercised:
-  * LEGACY (identity-blind dep matrix) — exhibits the hazard.
-  * TAGGED (per-edge tags) — must be clean (0 violations, no deadlock).
-
-Runs as a pytest (the two test_* functions below) and also standalone as a CLI:
+Runs as a pytest (the test_* function below) and also standalone as a CLI:
     python3 model/tests/test_dep_sync.py [--seeds N] [--clusters M] [--tag-width W]
 """
 import argparse
@@ -34,11 +32,11 @@ GEMM, DMA, HOST = 0, 1, 2          # core ids (row/col of the dep matrix)
 
 
 def build_stress_dfg(n_clusters=2):
-    """A synthetic multi-cluster stress DFG that reproduces the counter-sharing
-    hazard. In each cluster: an entry root on the producer core gates a late
+    """A synthetic multi-cluster stress DFG that maximizes dep-matrix cell
+    sharing. In each cluster: an entry root on the producer core gates a late
     producer pA AND feeds a queue-late consumer cLate through the SAME
     cell[CONS][PROD] -- the pinned-early stray. Across clusters: cluster k's
-    producer also strays onto cluster 0's busy column (the cross-cluster hazard)."""
+    producer also strays onto cluster 0's busy column (cross-cluster aliasing)."""
     d = BingoDFG()
     CONS, PROD = GEMM, DMA         # consumers on GEMM core, producers on DMA core
     per_cluster = {}
@@ -49,7 +47,7 @@ def build_stress_dfg(n_clusters=2):
         return n
 
     for cl in range(n_clusters):
-        # entry sits on the PRODUCER core so its stray increment lands on the SAME
+        # entry sits on the PRODUCER core so its stray set lands on the SAME
         # cell[CONS][PROD] that cA waits on (that aliasing is the whole hazard).
         E  = N(cl, PROD, f"entry_c{cl}")
         A0 = N(cl, PROD, f"A0_c{cl}"); B0 = N(cl, PROD, f"B0_c{cl}")
@@ -72,16 +70,15 @@ def build_stress_dfg(n_clusters=2):
     return d
 
 
-def compile_dfg(d, tagged, tag_width):
-    """Run the mini-compiler pipeline; with `tagged`, allocate per-edge tags
-    (the identity-aware fix)."""
+def compile_dfg(d, tag_width):
+    """Run the full mini-compiler pipeline, ending with the per-edge tag
+    allocator."""
     d.bingo_compile_conditional_regions()
     d.bingo_transform_dfg_add_dummy_set_nodes()
     d.bingo_transform_dfg_add_dummy_check_nodes()
     d.bingo_assign_normal_node_dep_check_info()
     d.bingo_assign_normal_node_dep_set_info()
-    if tagged:
-        d.bingo_transform_dfg_allocate_dep_tags(tag_width=tag_width)
+    d.bingo_transform_dfg_allocate_dep_tags(tag_width=tag_width)
 
 
 def _mask(cores):
@@ -110,16 +107,16 @@ def _to_descriptors(d):
     return per
 
 
-def analyze(n_clusters, tagged, tag_width=3, seeds=20, work_delay_range=(20, 50)):
-    """Compile the stress DFG (legacy or tagged) and return the union of
-    dispatch-before-producer violations over `seeds` seeded timings, split into
+def analyze(n_clusters, tag_width=3, seeds=20, work_delay_range=(20, 50)):
+    """Compile the stress DFG and return the union of dispatch-before-producer
+    violations over `seeds` seeded timings, split into
     (cross_cluster, same_cluster, deadlock_count, name_map)."""
     d = build_stress_dfg(n_clusters)
     orig_edges = [(u.node_id, v.node_id) for u, v in d.edges()]  # before dummy nodes
     loc = {n.node_id: (n.assigned_chiplet_id, n.assigned_cluster_id, n.assigned_core_id)
            for n in d.node_list}
     name = {n.node_id: n.node_name for n in d.node_list}
-    compile_dfg(d, tagged=tagged, tag_width=tag_width)
+    compile_dfg(d, tag_width=tag_width)
     per = _to_descriptors(d)
 
     cross, same, deadlocks = {}, {}, 0
@@ -146,18 +143,11 @@ def analyze(n_clusters, tagged, tag_width=3, seeds=20, work_delay_range=(20, 50)
 # ---------------------------------------------------------------------------
 # Pytest
 # ---------------------------------------------------------------------------
-def test_legacy_pipeline_exhibits_hazard():
-    """Control: the identity-blind pipeline lets a consumer dispatch before its
-    producer (the bug exists), so the gate is actually exercising something."""
-    _cross, same, _dl, _name = analyze(n_clusters=2, tagged=False, seeds=20)
-    assert len(same) >= 1, "expected the legacy pipeline to exhibit the hazard"
-
-
 def test_tagged_pipeline_is_clean():
     """The identity-aware pipeline (per-edge tags) must drive ALL
     dispatch-before-producer violations to zero and never deadlock."""
     for n_clusters in (1, 2, 3):
-        cross, same, deadlocks, _name = analyze(n_clusters=n_clusters, tagged=True, seeds=20)
+        cross, same, deadlocks, _name = analyze(n_clusters=n_clusters, seeds=20)
         assert len(cross) == 0, f"{n_clusters} clusters: cross-cluster violations {cross}"
         assert len(same) == 0, f"{n_clusters} clusters: same-cluster violations {same}"
         assert deadlocks == 0, f"{n_clusters} clusters: {deadlocks} deadlocks"
@@ -183,15 +173,9 @@ def main():
     ap.add_argument("--seeds", type=int, default=20)
     ap.add_argument("--clusters", type=int, default=2)
     ap.add_argument("--tag-width", type=int, default=3)
-    ap.add_argument("--legacy-only", action="store_true")
     args = ap.parse_args()
 
-    lc, ls, ld, ln = analyze(args.clusters, tagged=False, tag_width=args.tag_width, seeds=args.seeds)
-    _report(f"LEGACY (identity-blind) | clusters={args.clusters} seeds={args.seeds}", lc, ls, ld, ln)
-    if args.legacy_only:
-        return
-
-    tc, ts, td, tn = analyze(args.clusters, tagged=True, tag_width=args.tag_width, seeds=args.seeds)
+    tc, ts, td, tn = analyze(args.clusters, tag_width=args.tag_width, seeds=args.seeds)
     _report(f"TAGGED (tags, W={args.tag_width}) | clusters={args.clusters} seeds={args.seeds}",
             tc, ts, td, tn)
     if len(tc) + len(ts) + td:

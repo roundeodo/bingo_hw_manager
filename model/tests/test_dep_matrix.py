@@ -1,14 +1,14 @@
-"""Unit tests for the counter-based dependency matrix model."""
+"""Unit tests for the identity-aware (tagged) dependency matrix model."""
 
 import pytest
 from model.bingo_sim_dep_matrix import DepMatrix
 
 
-def row_bitmask(dm, row):
-    """Convert a counter row to a bitmask (bit c = 1 if counter[row][c] >= 1)."""
+def row_bitmask(dm, row, tag=0):
+    """Convert a row to a bitmask (bit c = 1 if `tag` is live in cell [row][c])."""
     mask = 0
     for c in range(dm.cols):
-        if dm.counters[row][c] >= 1:
+        if tag in dm.tags[row][c]:
             mask |= (1 << c)
     return mask
 
@@ -29,7 +29,7 @@ class TestDepMatrix:
 
     def test_check_row_pass(self):
         dm = DepMatrix(3, 3)
-        # Set: row 0 depends on col 1 (counter[0][1] = 1)
+        # Set: row 0 depends on col 1
         dm.set_column(1, 0b001)  # set_code bit 0 → row 0, col 1
         assert row_bitmask(dm, 0) == 0b010
         # Check: row 0 with check_code = 0b010 → should pass
@@ -58,28 +58,17 @@ class TestDepMatrix:
         dm.clear_row(1, 0b001)
         assert row_bitmask(dm, 1) == 0b010  # col 1 still set
 
-    def test_counter_accumulation(self):
-        """Counter-based: duplicate set_column increments counter, always succeeds."""
+    def test_set_is_idempotent_per_tag(self):
+        """Presence-bit semantics: a duplicate set on the same (cell, tag) is
+        absorbed — one clear drains it. Concurrently-live duplicates must use
+        distinct tags (the compiler guarantees this)."""
         dm = DepMatrix(3, 3)
-        # Set col 0, row 1
-        result1 = dm.set_column(0, 0b010)
-        assert result1 is True
-        assert dm.counters[1][0] == 1
-
-        # Set col 0, row 1 again → counter increments to 2
-        result2 = dm.set_column(0, 0b010)
-        assert result2 is True
-        assert dm.counters[1][0] == 2
-
-        # Clear once: counter goes to 1 (still satisfies check)
-        dm.clear_row(1, 0b001)
-        assert dm.counters[1][0] == 1
+        assert dm.set_column(0, 0b010) is True
+        assert dm.set_column(0, 0b010) is True  # same cell, same tag → absorbed
         assert dm.check_row(1, 0b001) is True
 
-        # Clear again: counter goes to 0
         dm.clear_row(1, 0b001)
-        assert dm.counters[1][0] == 0
-        assert dm.check_row(1, 0b001) is False
+        assert dm.check_row(1, 0b001) is False  # a single clear drains the bit
 
     def test_no_overlap_different_rows(self):
         dm = DepMatrix(3, 3)
@@ -129,12 +118,12 @@ class TestDepMatrix:
 
 
 class TestDepMatrixTagged:
-    """Identity-aware path (EnableTaggedDeps=1): a '+1' raised for one edge's tag
-    can only be drained by a consumer that expects that same tag."""
+    """Identity awareness: a set raised for one edge's tag can only be drained
+    by a consumer that expects that same tag."""
 
     def test_stray_tag_does_not_satisfy_check(self):
         dm = DepMatrix(3, 3)
-        # A stray producer raises counter[0][1] with tag 7 (meant for another edge).
+        # A stray producer sets cell [0][1] with tag 7 (meant for another edge).
         dm.set_column(1, 0b001, tag=7)
         # A consumer on row 0 waiting on col 1 with its OWN tag 2 must NOT pass.
         assert dm.check_row(0, 0b010, tag=2) is False
@@ -152,10 +141,9 @@ class TestDepMatrixTagged:
         assert dm.check_row(0, 0b010, tag=1) is False   # tag 1 drained
         assert dm.check_row(0, 0b010, tag=2) is True    # tag 2 untouched
 
-    def test_tagged_and_untagged_paths_are_independent(self):
+    def test_none_tag_is_tag_zero(self):
         dm = DepMatrix(3, 3)
-        dm.set_column(0, 0b010)            # untagged increment, counter[1][0]
-        dm.set_column(0, 0b010, tag=5)     # tagged increment, tbl[1][0][5]
-        assert dm.check_row(1, 0b001) is True            # untagged path sees its count
-        assert dm.check_row(1, 0b001, tag=5) is True     # tagged path sees its tag
+        dm.set_column(0, 0b010)            # tag=None → tag 0
+        assert dm.check_row(1, 0b001, tag=0) is True
+        assert dm.check_row(1, 0b001) is True            # None on check side too
         assert dm.check_row(1, 0b001, tag=9) is False    # unrelated tag absent

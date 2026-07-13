@@ -4,6 +4,13 @@
 // This is the original test case from the bingo_hw_manager testbench.
 // 4 chiplets, 2 clusters each, 3 cores each.
 // Tests intra-chiplet and inter-chiplet dependencies with dummy set/check nodes.
+//
+// Per-edge identity tags: three dep-matrix cells carry TWO concurrently-live
+// edges each, so the second edge on each cell uses tag 1 (as the mini-compiler
+// would allocate); all other edges keep tag 0:
+//   * chip2 (cl0,r0,c1): 10->25 (tag0), 9->11  (tag1)
+//   * chip3 (cl0,r0,c0): 20->26 (tag0), 22->12 (tag1)
+//   * chip3 (cl0,r0,c1): 13->27 (tag0), 14->16 (tag1)
 // =============================================================================
 
 // 16 normal tasks (IDs 1-16) + 12 dummy tasks (IDs 17-28)
@@ -70,7 +77,8 @@ bingo_hw_manager_task_desc_full_t chip2_cluster0_core0_gemm = pack_normal_task(
 bingo_hw_manager_task_desc_full_t chip2_cluster0_core1_dma = pack_normal_task(
     1'b0, 16'd9, 2, 0, 1,
     1'b1, bingo_hw_manager_dep_code_t'(8'b00000001),
-    1'b1, 1'b0, 2, 0, bingo_hw_manager_dep_code_t'(8'b00000001)
+    1'b1, 1'b0, 2, 0, bingo_hw_manager_dep_code_t'(8'b00000001),
+    '0, 4'd1                                                 // set tag1: cell (r0,c1) shared with 10->25
 );
 
 bingo_hw_manager_task_desc_full_t chip2_cluster1_core1_dma = pack_normal_task(
@@ -82,14 +90,16 @@ bingo_hw_manager_task_desc_full_t chip2_cluster1_core1_dma = pack_normal_task(
 bingo_hw_manager_task_desc_full_t chip2_cluster0_core0_gemm_2 = pack_normal_task(
     1'b0, 16'd11, 2, 0, 0,
     1'b1, bingo_hw_manager_dep_code_t'(8'b00000010),
-    1'b0, 1'b0, 0, 0, '0
+    1'b0, 1'b0, 0, 0, '0,
+    4'd1                                                     // check tag1: drains task 9's set only
 );
 
 // === Chiplet 3 tasks ===
 bingo_hw_manager_task_desc_full_t chip3_cluster0_core0_gemm_1 = pack_normal_task(
     1'b0, 16'd12, 3, 0, 0,
     1'b1, bingo_hw_manager_dep_code_t'(8'b00000001),
-    1'b1, 1'b0, 3, 0, bingo_hw_manager_dep_code_t'(8'b00000100)
+    1'b1, 1'b0, 3, 0, bingo_hw_manager_dep_code_t'(8'b00000100),
+    4'd1, '0                                                 // check tag1: drains task 22's set only
 );
 
 bingo_hw_manager_task_desc_full_t chip3_cluster0_core1_dma = pack_normal_task(
@@ -101,7 +111,8 @@ bingo_hw_manager_task_desc_full_t chip3_cluster0_core1_dma = pack_normal_task(
 bingo_hw_manager_task_desc_full_t chip3_cluster1_core1_dma = pack_normal_task(
     1'b0, 16'd14, 3, 1, 1,
     1'b1, bingo_hw_manager_dep_code_t'(8'b00000001),
-    1'b1, 1'b0, 3, 0, bingo_hw_manager_dep_code_t'(8'b00000001)
+    1'b1, 1'b0, 3, 0, bingo_hw_manager_dep_code_t'(8'b00000001),
+    '0, 4'd1                                                 // set tag1: cell (r0,c1) shared with 13->27
 );
 
 bingo_hw_manager_task_desc_full_t chip3_cluster0_core2_simd = pack_normal_task(
@@ -113,7 +124,8 @@ bingo_hw_manager_task_desc_full_t chip3_cluster0_core2_simd = pack_normal_task(
 bingo_hw_manager_task_desc_full_t chip3_cluster0_core0_gemm_2 = pack_normal_task(
     1'b0, 16'd16, 3, 0, 0,
     1'b1, bingo_hw_manager_dep_code_t'(8'b00000010),
-    1'b0, 1'b0, 0, 0, '0
+    1'b0, 1'b0, 0, 0, '0,
+    4'd1                                                     // check tag1: drains task 14's set only
 );
 
 // === Dummy Set Nodes ===
@@ -144,7 +156,8 @@ bingo_hw_manager_task_desc_full_t dummy_set_chip2_local_0 = pack_dummy_set_task(
 
 bingo_hw_manager_task_desc_full_t dummy_set_chip2_to_chip3 = pack_dummy_set_task(
     1'b1, 16'd22, 2, 0, 0,
-    1'b1, 1'b0, 3, 0, bingo_hw_manager_dep_code_t'(8'b00000001)
+    1'b1, 1'b0, 3, 0, bingo_hw_manager_dep_code_t'(8'b00000001),
+    4'd1                                                     // set tag1: cell (r0,c0) shared with 20->26
 );
 
 bingo_hw_manager_task_desc_full_t dummy_set_chip3_local_0 = pack_dummy_set_task(

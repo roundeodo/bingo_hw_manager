@@ -13,7 +13,8 @@ def make_task(task_id, chiplet, cluster, core,
               dep_check_en=False, dep_check_code=0,
               dep_set_en=False, dep_set_code=0,
               dep_set_chiplet=0, dep_set_cluster=0,
-              task_type=0, dep_set_all=False):
+              task_type=0, dep_set_all=False,
+              dep_check_tag=0, dep_set_tag=0):
     return TaskDescriptor(
         task_type=task_type,
         task_id=task_id,
@@ -27,6 +28,8 @@ def make_task(task_id, chiplet, cluster, core,
         dep_set_chiplet_id=dep_set_chiplet,
         dep_set_cluster_id=dep_set_cluster,
         dep_set_code=dep_set_code,
+        dep_check_tag=dep_check_tag,
+        dep_set_tag=dep_set_tag,
     )
 
 
@@ -68,7 +71,14 @@ class TestCrossChipletDep:
         assert done_order.index(1) < done_order.index(2)
 
     def test_default_27_task_dfg(self):
-        """Run the same 27-task DFG that the RTL testbench uses."""
+        """Run the same 27-task DFG that the RTL testbench uses.
+
+        Three dep-matrix cells carry TWO concurrently-live edges each, so the
+        second edge on each cell uses tag 1 (mirrors tb_stimulus_default.svh):
+          * chip2 (cl0,r0,c1): 10->25 (tag0), 9->11  (tag1)
+          * chip3 (cl0,r0,c0): 20->26 (tag0), 22->12 (tag1)
+          * chip3 (cl0,r0,c1): 13->27 (tag0), 14->16 (tag1)
+        """
         config = SimConfig(
             num_chiplets=4,
             num_clusters_per_chiplet=2,
@@ -123,11 +133,12 @@ class TestCrossChipletDep:
                       dep_set_chiplet=2, dep_set_cluster=0),
             make_task(9, 2, 0, 1, dep_check_en=True, dep_check_code=0b001,
                       dep_set_en=True, dep_set_code=0b001,
-                      dep_set_chiplet=2, dep_set_cluster=0),
+                      dep_set_chiplet=2, dep_set_cluster=0, dep_set_tag=1),
             make_task(25, 2, 0, 0, task_type=1, dep_check_en=True, dep_check_code=0b010),
-            make_task(11, 2, 0, 0, dep_check_en=True, dep_check_code=0b010),
+            make_task(11, 2, 0, 0, dep_check_en=True, dep_check_code=0b010,
+                      dep_check_tag=1),
             make_task(22, 2, 0, 0, task_type=1, dep_set_en=True, dep_set_code=0b001,
-                      dep_set_chiplet=3, dep_set_cluster=0),
+                      dep_set_chiplet=3, dep_set_cluster=0, dep_set_tag=1),
         ]
 
         # Chiplet 3 tasks
@@ -135,7 +146,7 @@ class TestCrossChipletDep:
             make_task(26, 3, 0, 0, task_type=1, dep_check_en=True, dep_check_code=0b001),
             make_task(12, 3, 0, 0, dep_check_en=True, dep_check_code=0b001,
                       dep_set_en=True, dep_set_code=0b100,
-                      dep_set_chiplet=3, dep_set_cluster=0),
+                      dep_set_chiplet=3, dep_set_cluster=0, dep_check_tag=1),
             make_task(15, 3, 0, 2, dep_check_en=True, dep_check_code=0b001,
                       dep_set_en=True, dep_set_code=0b001,
                       dep_set_chiplet=3, dep_set_cluster=0),
@@ -148,9 +159,10 @@ class TestCrossChipletDep:
                       dep_set_chiplet=3, dep_set_cluster=0),
             make_task(14, 3, 1, 1, dep_check_en=True, dep_check_code=0b001,
                       dep_set_en=True, dep_set_code=0b001,
-                      dep_set_chiplet=3, dep_set_cluster=0),
+                      dep_set_chiplet=3, dep_set_cluster=0, dep_set_tag=1),
             make_task(27, 3, 0, 0, task_type=1, dep_check_en=True, dep_check_code=0b110),
-            make_task(16, 3, 0, 0, dep_check_en=True, dep_check_code=0b010),
+            make_task(16, 3, 0, 0, dep_check_en=True, dep_check_code=0b010,
+                      dep_check_tag=1),
         ]
 
         sim.load_tasks({0: chip0, 1: chip1, 2: chip2, 3: chip3})

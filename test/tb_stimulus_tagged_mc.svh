@@ -1,6 +1,6 @@
 // =============================================================================
 // Multi-cluster tagged stimulus: cross-cluster column-aliasing, disambiguated
-// by per-edge tags (the core purpose of EnableTaggedDeps; hazard 2a in
+// by per-edge tags (the core purpose of the tagged dep matrix; hazard 2a in
 // COUNTER_SHARING_BUG.md). Single chiplet, TWO clusters, 3 cores.
 //
 // Both producers sit on the DMA core (core1) and BOTH set cluster-0's cell

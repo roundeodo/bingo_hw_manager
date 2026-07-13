@@ -5,7 +5,7 @@
 // (consumers on core0/GEMM, producers on core1/DMA) but carry DISTINCT tags:
 //   P1 --(tag 0)--> C1      P2 --(tag 1)--> C2
 //
-// With the per-edge tags correctly plumbed (EnableTaggedDeps=1), C1 drains only
+// With the per-edge tags correctly plumbed, C1 drains only
 // P1's tag-0 token and C2 only P2's tag-1 token, so all four tasks complete. If
 // the tag datapath were broken (tags collapsed to 0), the presence-bit scoreboard
 // would saturate on slot 0 and the second consumer would never pass its check ->

@@ -108,8 +108,8 @@ def _run():
 def test_consumer_waits_for_its_own_producer():
     """cA must not dispatch before pA (its real producer) is DONE.
 
-    FAILS on today's identity-blind model (cA drains E's stray +1 and dispatches
-    early); the per-edge tag fix must make it pass.
+    Used to FAIL on the removed identity-blind counter matrix (cA drained E's
+    stray +1 and dispatched early); the per-edge tags keep it passing.
     """
     res, prod_id, cons_id = _run()
     dispatch, done = _dispatch_done_times(res.trace)

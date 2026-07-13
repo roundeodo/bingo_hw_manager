@@ -34,7 +34,8 @@ class TaskDescriptor:
     dep_set_chiplet_id: int
     dep_set_cluster_id: int
     dep_set_code: int       # bitmask
-    # Per-edge identity tags (EnableTaggedDeps). None → legacy identity-blind path.
+    # Per-edge identity tags (assigned by the compiler's tag allocator;
+    # unset/None is coerced to tag 0 in the dep matrix).
     dep_check_tag: Optional[int] = None
     dep_set_tag: Optional[int] = None
     # Flux Tier 1: Conditional Execution
