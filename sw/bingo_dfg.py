@@ -336,9 +336,9 @@ class BingoDFG(DiGraphWrapper[BingoNode]):
                     cur_node.dep_set_chiplet_id = 0
 
     def bingo_transform_dfg_allocate_dep_tags(self, tag_width: int = 3) -> None:
-        """Assign per-edge identity tags (EnableTaggedDeps) so a consumer drains
-        only ITS producer's increment, never a stray that happens to share the
-        same dep-matrix cell.
+        """Assign per-edge identity tags so a consumer drains only ITS
+        producer's set, never a stray that happens to share the same
+        dep-matrix cell.
 
         Must run LAST -- after the dummy-set / dummy-check passes and the
         dep-info assignment -- when every set/check operation is final. By then

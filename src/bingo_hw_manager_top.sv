@@ -19,12 +19,9 @@ module bingo_hw_manager_top #(
     parameter int unsigned HOST_DVFS_MSIP_BIT = 3,
     parameter int unsigned ChipIdWidth = 8,
     parameter int unsigned TaskIdWidth = 12,
-    // Identity-aware dependency tracking (per-edge tags), DEFAULT ON. The
-    // mini-compiler's per-edge tags are plumbed to the tagged dep-matrix scoreboard
-    // so a consumer drains only ITS producer's increment. Set to 0 for the legacy
-    // identity-blind matrix (no counter-sharing mitigation; the SW serialize
-    // workaround has been removed -- tags supersede it).
-    parameter bit          EnableTaggedDeps = 1'b1,
+    // Identity-aware dependency tracking (per-edge tags). The mini-compiler's
+    // per-edge tags are plumbed to the tagged dep-matrix scoreboard so a
+    // consumer drains only ITS producer's increment (no counter-sharing hazard).
     parameter int unsigned DepTagWidth = 4,
     // AXI interface types
     // The task queue holds tasks to be scheduled to the devices
@@ -153,7 +150,7 @@ module bingo_hw_manager_top #(
     typedef logic [cf_math_pkg::idx_width(NUM_CORES_PER_CLUSTER)-1:0   ] bingo_hw_manager_assigned_core_id_t;
     // Dependency check info struct
     typedef logic [NUM_CORES_PER_CLUSTER-1:0]            bingo_hw_manager_dep_code_t;
-    // Per-edge identity tag (EnableTaggedDeps). Carried alongside the dep code so
+    // Per-edge identity tag. Carried alongside the dep code so
     // it flows through every existing dep_check_info / dep_set_info copy unchanged.
     typedef logic [DepTagWidth-1:0]                      bingo_hw_manager_dep_tag_t;
     typedef struct packed{
@@ -771,7 +768,6 @@ module bingo_hw_manager_top #(
         bingo_hw_manager_dep_matrix #(
             .DEP_MATRIX_ROWS(NUM_CORES_PER_CLUSTER),
             .DEP_MATRIX_COLS(NUM_CORES_PER_CLUSTER),
-            .EnableTaggedDeps(EnableTaggedDeps),
             .TagWidth(DepTagWidth)
         ) i_dep_matrix (
             .clk_i             (clk_i                    ),

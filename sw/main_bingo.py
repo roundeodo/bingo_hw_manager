@@ -289,7 +289,7 @@ bingo_dfg.bingo_visualize_dfg("original_dfg.png")
 # allocator's min-chain-cover reuses a tag whenever two edges on a cell can never
 # be live at once (happens-before / same-core order), keeping the count within
 # DepTagWidth without any separate concurrency-bounding pass.
-TAG_W = 4  # must match the hw_manager EnableTaggedDeps build's DepTagWidth
+TAG_W = 4  # must match the hw_manager's DepTagWidth
 # Transform the DFG to add dummy set nodes
 bingo_dfg.bingo_transform_dfg_add_dummy_set_nodes()
 bingo_dfg.bingo_visualize_dfg("dfg_after_add_dummy_dep_set_nodes.png")

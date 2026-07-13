@@ -72,13 +72,6 @@ typedef logic [NUM_CORES_PER_CLUSTER-1:0]                            bingo_hw_ma
 // Per-edge identity tag (must mirror bingo_hw_manager_top exactly).
 localparam int unsigned DEP_TAG_WIDTH = 4;
 typedef logic [DEP_TAG_WIDTH-1:0]                                    bingo_hw_manager_dep_tag_t;
-// Opt-in: a testbench that `define`s BINGO_TAGGED_DEPS before including this
-// harness instantiates the DUT with identity-aware dep tracking enabled.
-`ifdef BINGO_TAGGED_DEPS
-localparam bit ENABLE_TAGGED_DEPS = 1'b1;
-`else
-localparam bit ENABLE_TAGGED_DEPS = 1'b0;
-`endif
 
 typedef struct packed {
     bingo_hw_manager_dep_tag_t                   dep_check_tag;
@@ -505,7 +498,6 @@ for (genvar chiplet_idx = 0; chiplet_idx < NUM_CHIPLET; chiplet_idx++) begin : g
         .TASK_QUEUE_TYPE                     ( TASK_QUEUE_TYPE                     ),
         .NUM_CORES_PER_CLUSTER               ( NUM_CORES_PER_CLUSTER               ),
         .NUM_CLUSTERS_PER_CHIPLET            ( NUM_CLUSTERS_PER_CHIPLET            ),
-        .EnableTaggedDeps                    ( ENABLE_TAGGED_DEPS                  ),
         .DepTagWidth                         ( DEP_TAG_WIDTH                       ),
         .HostAxiLiteAddrWidth                ( HOST_AW                             ),
         .HostAxiLiteDataWidth                ( HOST_DW                             ),
@@ -736,16 +728,10 @@ for (genvar gi = 0; gi < NUM_CHIPLET; gi++) begin : gen_sig_export
     for (genvar gj = 0; gj < NUM_CLUSTERS_PER_CHIPLET; gj++) begin : gen_cl_export
         for (genvar gr = 0; gr < NUM_CORES_PER_CLUSTER; gr++) begin : gen_row_export
             for (genvar gc = 0; gc < NUM_CORES_PER_CLUSTER; gc++) begin : gen_col_export
-                // The dep-matrix internals differ per mode: gen_legacy has a
-                // saturating counter per cell; gen_tagged has a presence-bit
-                // scoreboard. Probe whichever exists (monitor/dump only).
-                if (ENABLE_TAGGED_DEPS) begin : g_tag_probe
-                    assign dep_counter_state[gi][gj][gr][gc] =
-                        8'(|gen_dut[gi].i_dut.gen_dep_matrix[gj].i_dep_matrix.gen_tagged.sb_q[gr][gc]);
-                end else begin : g_legacy_probe
-                    assign dep_counter_state[gi][gj][gr][gc] =
-                        gen_dut[gi].i_dut.gen_dep_matrix[gj].i_dep_matrix.gen_legacy.counter_q[gr][gc];
-                end
+                // Probe the presence-bit scoreboard: 1 if any tag is live in
+                // the cell (monitor/dump only).
+                assign dep_counter_state[gi][gj][gr][gc] =
+                    8'(|gen_dut[gi].i_dut.gen_dep_matrix[gj].i_dep_matrix.sb_q[gr][gc]);
             end
         end
     end

@@ -43,7 +43,7 @@ sources:
       - test/tb_bingo_hw_manager_top.sv
       - test/tb_bingo_hw_manager_cerf_basic.sv
       - test/tb_bingo_hw_manager_cerf_skip.sv
-      - test/tb_bingo_hw_manager_tagged.sv      # identity-aware deps end-to-end (EnableTaggedDeps=1)
+      - test/tb_bingo_hw_manager_tagged.sv      # identity-aware deps end-to-end
       - test/tb_bingo_hw_manager_tagged_mc.sv   # identity-aware deps, MULTI-CLUSTER cross-cluster aliasing
 
   # NOTE: Generated test files in test/generated/ are NOT listed here.

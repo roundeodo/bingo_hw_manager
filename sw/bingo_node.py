@@ -25,10 +25,10 @@ class BingoNode(metaclass=ABCMeta):
         self._dep_set_list: list[int] = []
         self._dep_set_chiplet_id: int = 0
         self._dep_set_cluster_id: int = 0
-        # Per-edge identity tags (EnableTaggedDeps). None until the tag-allocator
-        # pass runs; emitted only in tagged_mode so default builds are unchanged.
-        self._dep_check_tag: int | None = None
-        self._dep_set_tag: int | None = None
+        # Per-edge identity tags, stamped by the tag-allocator pass; tag 0 for
+        # ops the allocator leaves untouched (single-edge cells).
+        self._dep_check_tag: int = 0
+        self._dep_set_tag: int = 0
         # DARTS Tier 1: Conditional Execution
         self._cond_exec_en: bool = False
         self._cond_exec_group_id: int = 0
@@ -182,19 +182,19 @@ class BingoNode(metaclass=ABCMeta):
         self._dep_set_cluster_id = value
 
     @property
-    def dep_check_tag(self) -> int | None:
+    def dep_check_tag(self) -> int:
         return self._dep_check_tag
 
     @dep_check_tag.setter
-    def dep_check_tag(self, value: int | None) -> None:
+    def dep_check_tag(self, value: int) -> None:
         self._dep_check_tag = value
 
     @property
-    def dep_set_tag(self) -> int | None:
+    def dep_set_tag(self) -> int:
         return self._dep_set_tag
 
     @dep_set_tag.setter
-    def dep_set_tag(self, value: int | None) -> None:
+    def dep_set_tag(self, value: int) -> None:
         self._dep_set_tag = value
 
     def __str__(self):
@@ -215,22 +215,12 @@ class BingoNode(metaclass=ABCMeta):
         task_type_map = {"normal": "2'b00", "dummy": "2'b01", "gating": "2'b10"}
         task_type_sv = task_type_map.get(self._node_type, "2'b00")
 
-        # Identity-tag args (EnableTaggedDeps). The SV pack_* functions default
-        # these to '0, so emit them ONLY when the tag allocator has assigned a tag
-        # -> untagged builds produce byte-identical codegen to before. For
-        # pack_normal_task the args are positional (dep_check_tag, dep_set_tag), so
-        # to pass dep_set_tag we must also pass dep_check_tag (as '0 if unset).
-        if self._dep_set_tag is not None:
-            normal_tag_args = (f",\n    {self._dep_check_tag or 0}, // dep_check_tag"
-                               f"\n    {self._dep_set_tag} // dep_set_tag")
-        elif self._dep_check_tag is not None:
-            normal_tag_args = f",\n    {self._dep_check_tag} // dep_check_tag"
-        else:
-            normal_tag_args = ""
-        dcheck_tag_arg = ("" if self._dep_check_tag is None
-                          else f",\n    {self._dep_check_tag} // dep_check_tag")
-        dset_tag_arg = ("" if self._dep_set_tag is None
-                        else f",\n    {self._dep_set_tag} // dep_set_tag")
+        # Per-edge identity tag args, always emitted. For pack_normal_task the
+        # args are positional (dep_check_tag, dep_set_tag).
+        normal_tag_args = (f"    {self._dep_check_tag}, // dep_check_tag\n"
+                           f"    {self._dep_set_tag} // dep_set_tag\n")
+        dcheck_tag_arg = f"    {self._dep_check_tag} // dep_check_tag\n"
+        dset_tag_arg = f"    {self._dep_set_tag} // dep_set_tag\n"
 
         # Determine the appropriate pack function based on the node type
         if self._node_type in ("normal", "gating"):
@@ -250,8 +240,8 @@ class BingoNode(metaclass=ABCMeta):
                 f"    1'b{int(self._remote_dep_set_all)}, // dep_set_all_chiplet\n"
                 f"    {self._dep_set_chiplet_id}, // dep_set_chiplet_id\n"
                 f"    {self._dep_set_cluster_id}, // dep_set_cluster_id\n"
-                f"    {dep_set_code} // dep_set_code"
-                f"{normal_tag_args}\n"
+                f"    {dep_set_code}, // dep_set_code\n"
+                f"{normal_tag_args}"
                 f");"
             )
         elif self._node_type == "dummy":
@@ -266,8 +256,8 @@ class BingoNode(metaclass=ABCMeta):
                     f"    {self._assigned_cluster_id}, // assigned_cluster_id\n"
                     f"    {self._assigned_core_id}, // assigned_core_id\n"
                     f"    1'b{int(self._dep_check_enable)}, // dep_check_en\n"
-                    f"    {dep_check_code} // dep_check_code"
-                    f"{dcheck_tag_arg}\n"
+                    f"    {dep_check_code}, // dep_check_code\n"
+                    f"{dcheck_tag_arg}"
                     f");"
                 )
             else:
@@ -283,8 +273,8 @@ class BingoNode(metaclass=ABCMeta):
                     f"    1'b{int(self._remote_dep_set_all)}, // dep_set_all_chiplet\n"
                     f"    {self._dep_set_chiplet_id}, // dep_set_chiplet_id\n"
                     f"    {self._dep_set_cluster_id}, // dep_set_cluster_id\n"
-                    f"    {dep_set_code} // dep_set_code"
-                    f"{dset_tag_arg}\n"
+                    f"    {dep_set_code}, // dep_set_code\n"
+                    f"{dset_tag_arg}"
                     f");"
                 )
         else:
