@@ -390,21 +390,20 @@ class BingoDFG(DiGraphWrapper[BingoNode]):
                 "dep-tag allocation: multi-target set/check ops (e.g. broadcast "
                 f"dep_set) need shared reserved tags; not yet supported: {multi}")
 
-        # Same-core HOL reachability: at runtime each core dispatches its tasks in
-        # topological (= push) order, so a same-core node that comes later is
-        # effectively reachable from an earlier one. Add those consecutive same-core
-        # edges to a SCRATCH graph used only for tag-reuse reachability (no real
-        # edges, dep info unchanged). This collapses same-core (diagonal R==C) cells
-        # -- which are serialized by the core queue -- to a chain, so they need few
-        # tags instead of one per edge.
+        # Same-resource HOL reachability: at runtime each (cluster, core) pair
+        # dispatches its tasks in topological (= push) order, so a later task on
+        # that physical resource is effectively reachable from an earlier one.
+        # Add those consecutive resource edges to a scratch graph used only for
+        # tag-reuse reachability (no real edges or dep-info changes). This
+        # collapses serialized diagonal cells to a chain, so they need few tags.
         hb = nx.DiGraph()
         hb.add_nodes_from(self.nodes())
         hb.add_edges_from(self.edges())
-        by_core: dict = {}
+        by_resource: dict = {}
         for nd in topo:
-            by_core.setdefault((nd.assigned_chiplet_id, nd.assigned_cluster_id,
-                                nd.assigned_core_id), []).append(nd)
-        for seq in by_core.values():
+            by_resource.setdefault((nd.assigned_chiplet_id, nd.assigned_cluster_id,
+                                    nd.assigned_core_id), []).append(nd)
+        for seq in by_resource.values():
             for i in range(len(seq) - 1):
                 hb.add_edge(seq[i], seq[i + 1])
 
@@ -426,12 +425,12 @@ class BingoDFG(DiGraphWrapper[BingoNode]):
             edges.sort(key=lambda e: (pos[e[0]], pos[e[1]]))
             n = len(edges)
             # reach[a] = nodes reachable from edge a's consumer (its drain point) in
-            # the same-core-augmented graph -- so DFG paths AND same-core HOL order.
+            # the same-resource-augmented graph -- DFG paths plus resource order.
             reach = [nx.descendants(hb, cv) for (_su, cv) in edges]
             # a precedes b (may share a tag) iff edge a's drain happens-before edge
             # b's set: they meet at one node (a's consumer IS b's producer -- a node
             # dispatches/drains before it completes/sets), or b's producer is
-            # reachable from a's consumer (DFG path or same-core HOL order).
+            # reachable from a's consumer (DFG path or same-resource order).
             B = nx.Graph()
             for a in range(n):
                 B.add_node(("L", a)); B.add_node(("R", a))
@@ -1058,17 +1057,17 @@ class BingoDFG(DiGraphWrapper[BingoNode]):
         # Combine all the SystemVerilog strings with newlines
         return "\n\n".join(sv_strings)
 
-    def _core_balanced_topological_sort(self, chiplet_id: int) -> list:
-        """Topological sort that interleaves tasks across cores.
+    def _resource_balanced_topological_sort(self, chiplet_id: int) -> list:
+        """Topological sort that interleaves physical execution resources.
 
-        The standard topological sort may dump many tasks for the same core
+        The standard topological sort may dump many tasks for the same
+        ``(cluster, core)`` pair
         consecutively (e.g., a task + its dummy_set/check children). This
-        overflows the per-core waiting queue (depth 8) in the RTL, causing
-        the task_queue demux to stall and block tasks for other cores.
+        overflows that pair's waiting queue, causing the global task-list head
+        to stall and block otherwise independent resources.
 
         This sort maintains topological validity while spreading tasks across
-        cores round-robin: pick the ready task whose core was least recently
-        used.
+        physical resources round-robin.
         """
         # Filter nodes for this chiplet
         chiplet_nodes = set(
@@ -1089,43 +1088,50 @@ class BingoDFG(DiGraphWrapper[BingoNode]):
 
         # Ready set: nodes with in_degree == 0
         from collections import defaultdict
-        ready_by_core = defaultdict(list)
+        ready_by_resource = defaultdict(list)
         for node in chiplet_nodes:
             if in_degree[node] == 0:
-                ready_by_core[node.assigned_core_id].append(node)
+                resource = (node.assigned_cluster_id, node.assigned_core_id)
+                ready_by_resource[resource].append(node)
+
+        resources = sorted({
+            (node.assigned_cluster_id, node.assigned_core_id)
+            for node in chiplet_nodes
+        })
+        for nodes in ready_by_resource.values():
+            nodes.sort(key=lambda node: node.node_id)
 
         result = []
-        last_core = -1
-        num_cores = max(n.assigned_core_id for n in chiplet_nodes) + 1
+        last_resource_idx = -1
 
-        while any(ready_by_core.values()):
-            # Pick a core round-robin, preferring one different from last_core
+        while any(ready_by_resource.values()):
             chosen_node = None
-            for offset in range(1, num_cores + 1):
-                try_core = (last_core + offset) % num_cores
-                if ready_by_core[try_core]:
-                    chosen_node = ready_by_core[try_core].pop(0)
+            chosen_resource_idx = -1
+            for offset in range(1, len(resources) + 1):
+                try_idx = (last_resource_idx + offset) % len(resources)
+                resource = resources[try_idx]
+                if ready_by_resource[resource]:
+                    chosen_node = ready_by_resource[resource].pop(0)
+                    chosen_resource_idx = try_idx
                     break
 
             if chosen_node is None:
-                # Fallback: pick any ready node
-                for core_id in ready_by_core:
-                    if ready_by_core[core_id]:
-                        chosen_node = ready_by_core[core_id].pop(0)
-                        break
-                if chosen_node is None:
-                    break
+                break
 
             result.append(chosen_node)
-            last_core = chosen_node.assigned_core_id
+            last_resource_idx = chosen_resource_idx
 
             # Update in-degrees
             for succ in self.successors(chosen_node):
                 if succ in chiplet_nodes:
                     in_degree[succ] -= 1
                     if in_degree[succ] == 0:
-                        ready_by_core[succ.assigned_core_id].append(succ)
+                        resource = (succ.assigned_cluster_id, succ.assigned_core_id)
+                        ready_by_resource[resource].append(succ)
+                        ready_by_resource[resource].sort(key=lambda node: node.node_id)
 
+        if len(result) != len(chiplet_nodes):
+            raise nx.NetworkXUnfeasible("DFG contains a cycle")
         return result
 
     def bingo_emit_push_task_sv(self) -> str:
@@ -1133,7 +1139,7 @@ class BingoDFG(DiGraphWrapper[BingoNode]):
         sv_strings = []
         # Iterate over each chiplet
         for chiplet_id in range(MAX_NUM_CHIPLETS):
-            chiplet_nodes = self._core_balanced_topological_sort(chiplet_id)
+            chiplet_nodes = self._resource_balanced_topological_sort(chiplet_id)
             if not chiplet_nodes:
                 continue  # Skip this chiplet if no nodes exist
 

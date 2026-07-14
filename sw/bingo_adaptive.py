@@ -162,7 +162,7 @@ class AdaptiveSchedulingLoop:
         all_chiplets = sorted(set(n.assigned_chiplet_id for n in dfg.node_list))
         for chip_id in all_chiplets:
             per_chiplet[chip_id] = []
-            ordered = dfg._core_balanced_topological_sort(chip_id)
+            ordered = dfg._resource_balanced_topological_sort(chip_id)
             for node in ordered:
                 type_map = {"dummy": 1, "gating": 2}
                 tt = type_map.get(node.node_type, 0)

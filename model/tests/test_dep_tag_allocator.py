@@ -78,17 +78,17 @@ def test_shared_cell_edges_get_distinct_tags():
     a tag -- otherwise a consumer could drain the wrong producer's increment."""
     d = _compile(_shared_cell_dfg())
 
-    # Real runtime happens-before = DFG paths + same-core HOL (each core dispatches
-    # its tasks in topological order). Build that augmented graph, mirroring the
-    # allocator, so "shared tag => provably non-overlapping" is checked soundly.
+    # Real runtime happens-before = DFG paths + same-resource order. Build that
+    # augmented graph, mirroring the allocator, so shared tags are used only for
+    # provably non-overlapping edges.
     hb = nx.DiGraph()
     hb.add_nodes_from(d.nodes())
     hb.add_edges_from(d.edges())
-    by_core = {}
+    by_resource = {}
     for nd in nx.topological_sort(d):
-        by_core.setdefault((nd.assigned_chiplet_id, nd.assigned_cluster_id,
-                            nd.assigned_core_id), []).append(nd)
-    for seq in by_core.values():
+        by_resource.setdefault((nd.assigned_chiplet_id, nd.assigned_cluster_id,
+                                nd.assigned_core_id), []).append(nd)
+    for seq in by_resource.values():
         for i in range(len(seq) - 1):
             hb.add_edge(seq[i], seq[i + 1])
 

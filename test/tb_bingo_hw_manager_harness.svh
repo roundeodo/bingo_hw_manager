@@ -545,6 +545,10 @@ for (genvar chiplet_idx = 0; chiplet_idx < NUM_CHIPLET; chiplet_idx++) begin : g
         .bingo_hw_manager_normal_power_level_i( '0                                                          ),
         .bingo_hw_manager_pm_base_addr_i      ( '0                                                          ),
         .bingo_hw_manager_core_power_domain_i ( '0                                                          ),
+        .bingo_hw_manager_pm_mode_i           ( '0                                                          ),
+        .bingo_hw_manager_dvfs_clint_msip_addr_i( '0                                                        ),
+        .bingo_hw_manager_dvfs_ack_i          ( '0                                                          ),
+        .bingo_hw_manager_dvfs_request_o      ( /* unused */                                                ),
         .pm_axi_lite_req_o                    ( /* unused */                                                ),
         .pm_axi_lite_resp_i                   ( '0                                                          ),
         // DARTS Tier 1: CERF interface (stimulus files can drive these)
@@ -720,7 +724,7 @@ end
 // Signal export from generate blocks — allows runtime indexing for monitoring
 // ---------------------------------------------------------------------------
 logic [7:0] dep_counter_state [NUM_CHIPLET][NUM_CLUSTERS_PER_CHIPLET][NUM_CORES_PER_CLUSTER][NUM_CORES_PER_CLUSTER];
-logic [NUM_CORES_PER_CLUSTER-1:0] waiting_empty_export [NUM_CHIPLET];
+logic [NUM_CORES_PER_CLUSTER-1:0][NUM_CLUSTERS_PER_CHIPLET-1:0] waiting_empty_export [NUM_CHIPLET];
 logic [NUM_CORES_PER_CLUSTER-1:0][NUM_CLUSTERS_PER_CHIPLET-1:0] ready_empty_export [NUM_CHIPLET];
 logic [NUM_CORES_PER_CLUSTER-1:0][NUM_CLUSTERS_PER_CHIPLET-1:0] checkout_empty_export [NUM_CHIPLET];
 
@@ -765,12 +769,11 @@ task automatic dump_queue_state();
     for (int chip = 0; chip < NUM_CHIPLET; chip++) begin
         $display("  Chiplet %0d:", chip);
         for (int core = 0; core < NUM_CORES_PER_CLUSTER; core++) begin
-            $display("    Core %0d: waiting_dep_check = %s",
-                core,
-                waiting_empty_export[chip][core] ? "EMPTY" : "HAS_TASKS");
             for (int cl = 0; cl < NUM_CLUSTERS_PER_CHIPLET; cl++) begin
-                $display("      Cluster %0d: ready_q = %s, checkout_q = %s",
+                $display("    Core %0d, Cluster %0d: waiting_dep_check = %s, ready_q = %s, checkout_q = %s",
+                    core,
                     cl,
+                    waiting_empty_export[chip][core][cl] ? "EMPTY" : "HAS_TASKS",
                     ready_empty_export[chip][core][cl] ? "EMPTY" : "HAS_TASKS",
                     checkout_empty_export[chip][core][cl] ? "EMPTY" : "HAS_TASKS");
             end

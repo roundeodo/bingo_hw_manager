@@ -287,7 +287,7 @@ bingo_dfg.bingo_visualize_dfg("original_dfg.png")
 # Identity-aware deps: allocate one per-edge tag per (R,C) dep-matrix cell after
 # dep-info assignment, so a consumer drains only ITS producer's increment. The
 # allocator's min-chain-cover reuses a tag whenever two edges on a cell can never
-# be live at once (happens-before / same-core order), keeping the count within
+# be live at once (happens-before / same-resource order), keeping the count within
 # DepTagWidth without any separate concurrency-bounding pass.
 TAG_W = 4  # must match the hw_manager's DepTagWidth
 # Transform the DFG to add dummy set nodes

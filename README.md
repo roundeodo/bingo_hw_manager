@@ -88,7 +88,7 @@ The two tag fields are carved from the descriptor's reserved bits, so the
 
 ```
 1. PUSH      Host writes task descriptor to task queue
-2. ROUTE     Demux routes task to assigned core's waiting queue
+2. ROUTE     Demux routes task to the assigned (core, cluster) waiting queue
 3. CHECK     dep_check_manager reads dep_matrix:
              - dep_check_en=0: bypass (immediate pass)
              - dep_check_en=1: wait until the expected tag is present in
@@ -139,8 +139,9 @@ mitigation — have been **removed**; per-edge identity tags are the design.
 - **Software (mini-compiler):** `bingo_transform_dfg_allocate_dep_tags(W)` assigns
   each edge a tag via an optimal **minimum chain-cover** of the happens-before
   partial order per cell (edges that can never be live at once share a tag). The
-  order accounts for **same-core HOL** execution (each core dispatches its tasks in
-  topological order), which collapses same-core/diagonal cells to a single chain →
+  order accounts for **same-resource HOL** execution (each `(cluster, core)`
+  resource dispatches its tasks in topological order), which collapses
+  same-resource/diagonal cells to a single chain →
   one tag. This reuse is what lets a tiny fixed `DepTagWidth` suffice with **no
   separate concurrency-bounding pass**: if a cell ever needs more than `2**W`
   simultaneously-live edges the allocator **raises** (a placement signal —
@@ -151,8 +152,27 @@ mitigation — have been **removed**; per-edge identity tags are the design.
 
 The tags ride the existing datapath: they live inside `dep_check_info`/
 `dep_set_info` in the descriptor, flow through the dep-matrix set arbiter/demux in
-the `dep_matrix_set_meta` struct, and are checked by the per-core
+the `dep_matrix_set_meta` struct, and are checked by the per-resource
 `dep_check_manager`. End-to-end RTL test: `test/tb_bingo_hw_manager_tagged.sv`.
+
+## Per-(Core, Cluster) Waiting Pipelines
+
+Dependency waiting is partitioned by physical execution resource. Each
+`(core, cluster)` pair owns one waiting FIFO and one dependency-check FSM, so a
+blocked task on one cluster cannot block an independent task using the same core
+number on another cluster. The host descriptor remains unchanged because it
+already carries both IDs. The mini-compiler emits each chiplet's topological
+order round-robin across `(cluster, core)` pairs to avoid filling one pair's FIFO
+with a long descriptor run.
+
+RTL regression: `test/tb_bingo_hw_manager_waiting_mc.sv`.
+
+The chiplet task mailbox remains one in-order descriptor stream. If one
+physical resource accumulates `WaitingQueueDepth` blocked tasks, a later
+descriptor for that same resource still backpressures the global stream. The
+resource-balanced compiler order reduces this finite-capacity case; eliminating
+it entirely would require per-resource task-mailbox interfaces or an ingress
+reorder buffer, which is a separate protocol change.
 
 ## Per-(Core, Cluster) Done Queues
 
@@ -184,13 +204,11 @@ bingo_hw_manager_top
  |    +-- write_mailbox (AXI-Lite slave mode) OR
  |    +-- task_queue_master (AXI-Lite master mode)
  |
- +-- Per-Core Pipeline (NUM_CORES_PER_CLUSTER instances)
+ +-- Per-(Core, Cluster) Pipeline (NUM_CORES x NUM_CLUSTERS instances)
  |    +-- fifo_v3 (waiting_dep_check_queue, depth=8)
  |    +-- dep_check_manager (4-state FSM)
  |    +-- stream_filter (dep_check_en bypass)
- |    +-- stream_demux (route to cluster)
  |    +-- stream_filter (dummy task filter)
- |    +-- stream_demux (route to cluster, ready+checkout path)
  |
  +-- Per-Cluster Dep Matrix (NUM_CLUSTERS_PER_CHIPLET instances)
  |    +-- dep_matrix (tagged presence-bit scoreboard)

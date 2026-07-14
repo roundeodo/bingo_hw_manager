@@ -44,6 +44,7 @@ module bingo_hw_manager_top #(
     parameter int unsigned DoneQueueDepth = 32,
     parameter int unsigned CheckoutQueueDepth = 8,
     parameter int unsigned ReadyQueueDepth = 8,
+    parameter int unsigned WaitingQueueDepth = 8,
     // Address Offsets
     parameter int unsigned ReadyQueueAddrOffset = 4096,
     // Dependent parameters, DO NOT OVERRIDE!
@@ -296,50 +297,32 @@ module bingo_hw_manager_top #(
     logic                              chiplet_done_queue_mbox_empty;
     logic                              chiplet_done_queue_mbox_pop;
     bingo_hw_manager_task_desc_full_t  cur_chiplet_done_queue_task_desc;
-    /////////////////////////////////////////////////////////
-    // Stream demux core type
-    /////////////////////////////////////////////////////////
-    logic                                           stream_demux_core_type_inp_valid;
-    logic                                           stream_demux_core_type_inp_ready;
-    logic [cf_math_pkg::idx_width(NUM_CORES_PER_CLUSTER)-1:0]       stream_demux_core_type_oup_sel;
-    logic [NUM_CORES_PER_CLUSTER-1:0]               stream_demux_core_type_oup_valid;
-    logic [NUM_CORES_PER_CLUSTER-1:0]               stream_demux_core_type_oup_ready;
-
     ///////////////////////////////////
-    // Waiting dep check queue signals
+    // Per-(core, cluster) waiting dependency queues
+    //
+    // Ready/checkout/done queues are already indexed by the physical execution
+    // resource.  Keep the waiting stage in the same domain so a blocked task on
+    // one cluster cannot head-of-line block an independent task that happens to
+    // use the same core number on another cluster.
     ///////////////////////////////////
-    bingo_hw_manager_task_desc_t      [NUM_CORES_PER_CLUSTER-1:0] waiting_dep_check_task_desc;
-    logic                             [NUM_CORES_PER_CLUSTER-1:0] waiting_dep_check_queue_push;
-    logic                             [NUM_CORES_PER_CLUSTER-1:0] waiting_dep_check_queue_full;
-    logic                             [NUM_CORES_PER_CLUSTER-1:0] waiting_dep_check_queue_empty;
-    logic                             [NUM_CORES_PER_CLUSTER-1:0] waiting_dep_check_queue_pop;
+    bingo_hw_manager_task_desc_t [NUM_CORES_PER_CLUSTER-1:0][NUM_CLUSTERS_PER_CHIPLET-1:0] waiting_dep_check_task_desc;
+    logic                        [NUM_CORES_PER_CLUSTER-1:0][NUM_CLUSTERS_PER_CHIPLET-1:0] waiting_dep_check_queue_push;
+    logic                        [NUM_CORES_PER_CLUSTER-1:0][NUM_CLUSTERS_PER_CHIPLET-1:0] waiting_dep_check_queue_full;
+    logic                        [NUM_CORES_PER_CLUSTER-1:0][NUM_CLUSTERS_PER_CHIPLET-1:0] waiting_dep_check_queue_empty;
+    logic                        [NUM_CORES_PER_CLUSTER-1:0][NUM_CLUSTERS_PER_CHIPLET-1:0] waiting_dep_check_queue_pop;
+    logic task_queue_route_ready;
 
     ////////////////////////////////
     // Dep Check Manager Signals
     ////////////////////////////////
-    logic                             [NUM_CORES_PER_CLUSTER-1:0] dep_check_manager_inp_wait_dep_check_queue_valid;
-    logic                             [NUM_CORES_PER_CLUSTER-1:0] dep_check_manager_inp_wait_dep_check_queue_ready;
-    logic                             [NUM_CORES_PER_CLUSTER-1:0] dep_check_manager_oup_dep_check_valid;
-    logic                             [NUM_CORES_PER_CLUSTER-1:0] dep_check_manager_oup_dep_check_ready;
-    logic                             [NUM_CORES_PER_CLUSTER-1:0] dep_check_manager_oup_ready_and_checkout_queue_valid;
-    logic                             [NUM_CORES_PER_CLUSTER-1:0] dep_check_manager_oup_ready_and_checkout_queue_ready;
-    ////////////////////////////////
-    // Dep matrix demux signals
-    ////////////////////////////////
-    typedef logic [NUM_CLUSTERS_PER_CHIPLET-1:0] dep_matrix_demux_oup_t;
-    logic                             [NUM_CORES_PER_CLUSTER-1:0] demux_dep_matrix_inp_valid;
-    logic                             [NUM_CORES_PER_CLUSTER-1:0] demux_dep_matrix_inp_ready;
-    dep_matrix_demux_oup_t            [NUM_CORES_PER_CLUSTER-1:0] demux_dep_matrix_oup_valid;
-    dep_matrix_demux_oup_t            [NUM_CORES_PER_CLUSTER-1:0] demux_dep_matrix_oup_ready;
-
-    ////////////////////////////////
-    // Ready and Checkout queue demux signals
-    ////////////////////////////////
-    typedef logic [NUM_CLUSTERS_PER_CHIPLET-1:0] ready_and_checkout_queue_demux_oup_t;
-    logic                                          [NUM_CORES_PER_CLUSTER-1:0] demux_ready_and_checkout_queue_inp_valid;
-    logic                                          [NUM_CORES_PER_CLUSTER-1:0] demux_ready_and_checkout_queue_inp_ready;
-    ready_and_checkout_queue_demux_oup_t           [NUM_CORES_PER_CLUSTER-1:0] demux_ready_and_checkout_queue_oup_valid;
-    ready_and_checkout_queue_demux_oup_t           [NUM_CORES_PER_CLUSTER-1:0] demux_ready_and_checkout_queue_oup_ready;
+    logic [NUM_CORES_PER_CLUSTER-1:0][NUM_CLUSTERS_PER_CHIPLET-1:0] dep_check_manager_inp_wait_dep_check_queue_valid;
+    logic [NUM_CORES_PER_CLUSTER-1:0][NUM_CLUSTERS_PER_CHIPLET-1:0] dep_check_manager_inp_wait_dep_check_queue_ready;
+    logic [NUM_CORES_PER_CLUSTER-1:0][NUM_CLUSTERS_PER_CHIPLET-1:0] dep_check_manager_oup_dep_check_valid;
+    logic [NUM_CORES_PER_CLUSTER-1:0][NUM_CLUSTERS_PER_CHIPLET-1:0] dep_check_manager_oup_dep_check_ready;
+    logic [NUM_CORES_PER_CLUSTER-1:0][NUM_CLUSTERS_PER_CHIPLET-1:0] dep_check_manager_oup_ready_and_checkout_queue_valid;
+    logic [NUM_CORES_PER_CLUSTER-1:0][NUM_CLUSTERS_PER_CHIPLET-1:0] dep_check_manager_oup_ready_and_checkout_queue_ready;
+    logic [NUM_CORES_PER_CLUSTER-1:0][NUM_CLUSTERS_PER_CHIPLET-1:0] issue_ready_and_checkout_valid;
+    logic [NUM_CORES_PER_CLUSTER-1:0][NUM_CLUSTERS_PER_CHIPLET-1:0] issue_ready_and_checkout_ready;
 
     ////////////////////////////////
     // Ready Queue Filter Signals
@@ -469,18 +452,22 @@ module bingo_hw_manager_top #(
     // DARTS Tier 1: CERF state and per-core conditional skip signals
     logic [31:0] cerf_state;
     assign cerf_state_o = cerf_state;  // read-back for SW
-    logic [NUM_CORES_PER_CLUSTER-1:0] cond_exec_skip;
+    logic [NUM_CORES_PER_CLUSTER-1:0][NUM_CLUSTERS_PER_CHIPLET-1:0] cond_exec_skip;
 
-    // DARTS CERF: per-core conditional skip evaluation.
+    // DARTS CERF: per-(core, cluster) conditional skip evaluation.
     // Only valid when there IS a task being processed (queue not empty).
     // When cond_exec_en==0 (default), this is always 0 regardless of CERF state.
-    for (genvar c = 0; c < NUM_CORES_PER_CLUSTER; c++) begin: gen_cerf_skip
-        logic cerf_group_active_for_core;
-        assign cerf_group_active_for_core = cerf_state[waiting_dep_check_task_desc[c].cond_exec_group_id];
-        assign cond_exec_skip[c] = !waiting_dep_check_queue_empty[c] &&
-                                    waiting_dep_check_task_desc[c].cond_exec_en &&
-                                    (waiting_dep_check_task_desc[c].cond_exec_invert ?
-                                        cerf_group_active_for_core : !cerf_group_active_for_core);
+    for (genvar c = 0; c < NUM_CORES_PER_CLUSTER; c++) begin: gen_cerf_skip_core
+        for (genvar cl = 0; cl < NUM_CLUSTERS_PER_CHIPLET; cl++) begin: gen_cerf_skip_cluster
+            logic cerf_group_active;
+            assign cerf_group_active =
+                cerf_state[waiting_dep_check_task_desc[c][cl].cond_exec_group_id];
+            assign cond_exec_skip[c][cl] =
+                !waiting_dep_check_queue_empty[c][cl] &&
+                waiting_dep_check_task_desc[c][cl].cond_exec_en &&
+                (waiting_dep_check_task_desc[c][cl].cond_exec_invert ?
+                    cerf_group_active : !cerf_group_active);
+        end
     end
 
     // PM signals
@@ -559,7 +546,7 @@ module bingo_hw_manager_top #(
 
     assign muxed_task_data  = task_queue_mbox_data;
     assign muxed_task_valid = !task_queue_mbox_empty;
-    assign task_queue_mbox_pop = stream_demux_core_type_inp_ready && !task_queue_mbox_empty;
+    assign task_queue_mbox_pop = task_queue_route_ready && !task_queue_mbox_empty;
 
     // Compose the current task descriptor from the muxed source
     assign cur_task_desc_full = bingo_hw_manager_task_desc_full_t'(muxed_task_data);
@@ -662,100 +649,90 @@ module bingo_hw_manager_top #(
     assign cur_chiplet_done_queue_task_desc = bingo_hw_manager_task_desc_full_t'(chiplet_done_queue_mbox_data);
     assign chiplet_done_queue_mbox_pop =  stream_arbiter_dep_matrix_set_inp_ready[NUM_CORES_PER_CLUSTER * NUM_CLUSTERS_PER_CHIPLET] && !chiplet_done_queue_mbox_empty;
     //////////////////////////////////////////////////////////////////////
-    // Stream demux core type
+    // Task ingress and dependency checking per physical execution resource
     //////////////////////////////////////////////////////////////////////
-    stream_demux #(
-        .N_OUP ( NUM_CORES_PER_CLUSTER           )
-    ) i_stream_demux_core_type (
-        .inp_valid_i ( stream_demux_core_type_inp_valid ),
-        .inp_ready_o ( stream_demux_core_type_inp_ready ),
-        .oup_sel_i   ( stream_demux_core_type_oup_sel   ),
-        .oup_valid_o ( stream_demux_core_type_oup_valid ),
-        .oup_ready_i ( stream_demux_core_type_oup_ready )
-    );
-    always_comb begin: compose_stream_demux_core_type_signals
-        stream_demux_core_type_inp_valid = muxed_task_valid;
-        stream_demux_core_type_oup_sel = cur_task_desc.assigned_core_id;
-        for (int unsigned core = 0; core < NUM_CORES_PER_CLUSTER; core = core + 1) begin
-            stream_demux_core_type_oup_ready[core] = !waiting_dep_check_queue_full[core];
+    always_comb begin : route_task_to_waiting_queue
+        task_queue_route_ready = 1'b0;
+        for (int core = 0; core < NUM_CORES_PER_CLUSTER; core++) begin
+            for (int cluster = 0; cluster < NUM_CLUSTERS_PER_CHIPLET; cluster++) begin
+                waiting_dep_check_queue_push[core][cluster] = 1'b0;
+                if (muxed_task_valid &&
+                    (cur_task_desc.assigned_core_id == bingo_hw_manager_assigned_core_id_t'(core)) &&
+                    (cur_task_desc.assigned_cluster_id == bingo_hw_manager_assigned_cluster_id_t'(cluster))) begin
+                    task_queue_route_ready = !waiting_dep_check_queue_full[core][cluster];
+                    waiting_dep_check_queue_push[core][cluster] =
+                        !waiting_dep_check_queue_full[core][cluster];
+                end
+            end
         end
     end
 
+    for (genvar core = 0; core < NUM_CORES_PER_CLUSTER; core++) begin: gen_waiting_dep_check_core
+        for (genvar cluster = 0; cluster < NUM_CLUSTERS_PER_CHIPLET; cluster++) begin: gen_waiting_dep_check_cluster
+            fifo_v3 #(
+                .FALL_THROUGH ( 1'b0                         ),
+                .DEPTH        ( WaitingQueueDepth            ),
+                .dtype        ( bingo_hw_manager_task_desc_t )
+            ) i_waiting_dep_check_queue (
+                .clk_i       ( clk_i                                         ),
+                .rst_ni      ( rst_ni                                        ),
+                .testmode_i  ( 1'b0                                          ),
+                .flush_i     ( 1'b0                                          ),
+                .full_o      ( waiting_dep_check_queue_full[core][cluster]   ),
+                .empty_o     ( waiting_dep_check_queue_empty[core][cluster]  ),
+                .usage_o     ( /*not used*/                                  ),
+                .data_i      ( cur_task_desc                                 ),
+                .push_i      ( waiting_dep_check_queue_push[core][cluster]   ),
+                .data_o      ( waiting_dep_check_task_desc[core][cluster]    ),
+                .pop_i       ( waiting_dep_check_queue_pop[core][cluster]    )
+            );
 
-    for (genvar core = 0; core < NUM_CORES_PER_CLUSTER; core = core + 1) begin: gen_waiting_dep_check_queue
-        fifo_v3 #(
-            .FALL_THROUGH ( 1'b0                               ),
-            .DEPTH        ( 8                                  ),
-            .dtype        ( bingo_hw_manager_task_desc_t       )
-        ) i_waiting_dep_check_queue (
-            .clk_i       ( clk_i                               ),
-            .rst_ni      ( rst_ni                              ),
-            .testmode_i  ( 1'b0                                ),
-            .flush_i     ( 1'b0                                ),
-            .full_o      ( waiting_dep_check_queue_full[core]  ),
-            .empty_o     ( waiting_dep_check_queue_empty[core] ),
-            .usage_o     ( /*not used*/                        ),
-            .data_i      ( cur_task_desc                       ),
-            .push_i      ( waiting_dep_check_queue_push[core]  ),
-            .data_o      ( waiting_dep_check_task_desc[core]   ),
-            .pop_i       ( waiting_dep_check_queue_pop[core]   )
-        );
-        assign waiting_dep_check_queue_push[core] = stream_demux_core_type_oup_valid[core] && !waiting_dep_check_queue_full[core];
-        assign waiting_dep_check_queue_pop[core] = dep_check_manager_inp_wait_dep_check_queue_ready[core] && !waiting_dep_check_queue_empty[core];
+            assign waiting_dep_check_queue_pop[core][cluster] =
+                dep_check_manager_inp_wait_dep_check_queue_ready[core][cluster] &&
+                !waiting_dep_check_queue_empty[core][cluster];
+            assign dep_check_manager_inp_wait_dep_check_queue_valid[core][cluster] =
+                !waiting_dep_check_queue_empty[core][cluster];
 
-        bingo_hw_manager_dep_check_manager i_dep_check_manager(
-            .clk_i                       ( clk_i                        ),
-            .rst_ni                      ( rst_ni                       ),
-            .wait_dep_check_queue_valid_i(dep_check_manager_inp_wait_dep_check_queue_valid[core]),
-            .wait_dep_check_queue_ready_o(dep_check_manager_inp_wait_dep_check_queue_ready[core]),
-            .dep_check_valid_o           (dep_check_manager_oup_dep_check_valid[core]),
-            .dep_check_ready_i           (dep_check_manager_oup_dep_check_ready[core]),
-            .ready_and_checkout_queue_valid_o(dep_check_manager_oup_ready_and_checkout_queue_valid[core]),
-            .ready_and_checkout_queue_ready_i(dep_check_manager_oup_ready_and_checkout_queue_ready[core])
-        );
-        assign dep_check_manager_inp_wait_dep_check_queue_valid[core] = ~waiting_dep_check_queue_empty[core];
-        // To Dep Matrix
-        // For the dep matrix, if the dep check is disable, we do not need to send the task to dep matrix
-        stream_filter i_stream_filter_dep_check_en_to_dep_matrix (
-            .valid_i ( dep_check_manager_oup_dep_check_valid[core]    ),
-            .ready_o ( dep_check_manager_oup_dep_check_ready[core]    ),
-            .drop_i  ( (!waiting_dep_check_task_desc[core].dep_check_info.dep_check_en) ),
-            .valid_o ( demux_dep_matrix_inp_valid[core]  ),
-            .ready_i ( demux_dep_matrix_inp_ready[core]  )
-        );
-        stream_demux #(
-            .N_OUP ( NUM_CLUSTERS_PER_CHIPLET           )
-        ) i_stream_demux_from_waiting_dep_check_queue_to_dep_matrix (
-            .inp_valid_i ( demux_dep_matrix_inp_valid[core]    ),
-            .inp_ready_o ( demux_dep_matrix_inp_ready[core]    ),
-            .oup_sel_i   ( waiting_dep_check_task_desc[core].assigned_cluster_id ),
-            .oup_valid_o ( demux_dep_matrix_oup_valid[core]    ),
-            .oup_ready_i ( demux_dep_matrix_oup_ready[core]    )
-        );
-        // To Ready Queue and Checkout Queue
-        // We need a filter to drop the dummy check tasks
-        // The dummy check does not need to go to the ready and checkout queue
-        stream_filter i_stream_filter_dummy_check_task_to_ready_and_checkout_queue (
-            .valid_i ( dep_check_manager_oup_ready_and_checkout_queue_valid[core]    ),
-            .ready_o ( dep_check_manager_oup_ready_and_checkout_queue_ready[core]    ),
-            .drop_i  ( (waiting_dep_check_task_desc[core].task_type == 2'b01) && (waiting_dep_check_task_desc[core].dep_check_info.dep_check_en) ), // Drop if it is a dummy check task
-            .valid_o ( demux_ready_and_checkout_queue_inp_valid[core]  ),
-            .ready_i ( demux_ready_and_checkout_queue_inp_ready[core]  )
-        );
-        stream_demux #(
-            .N_OUP ( NUM_CLUSTERS_PER_CHIPLET           )
-        ) i_stream_demux_from_waiting_dep_check_queue_to_ready_and_checkout_queue (
-            .inp_valid_i ( demux_ready_and_checkout_queue_inp_valid[core]    ),
-            .inp_ready_o ( demux_ready_and_checkout_queue_inp_ready[core]    ),
-            .oup_sel_i   ( waiting_dep_check_task_desc[core].assigned_cluster_id ),
-            .oup_valid_o ( demux_ready_and_checkout_queue_oup_valid[core]    ),
-            .oup_ready_i ( demux_ready_and_checkout_queue_oup_ready[core]    )
-        );
+            bingo_hw_manager_dep_check_manager i_dep_check_manager(
+                .clk_i                       ( clk_i ),
+                .rst_ni                      ( rst_ni ),
+                .wait_dep_check_queue_valid_i(dep_check_manager_inp_wait_dep_check_queue_valid[core][cluster]),
+                .wait_dep_check_queue_ready_o(dep_check_manager_inp_wait_dep_check_queue_ready[core][cluster]),
+                .dep_check_valid_o           (dep_check_manager_oup_dep_check_valid[core][cluster]),
+                .dep_check_ready_i           (dep_check_manager_oup_dep_check_ready[core][cluster]),
+                .ready_and_checkout_queue_valid_o(dep_check_manager_oup_ready_and_checkout_queue_valid[core][cluster]),
+                .ready_and_checkout_queue_ready_i(dep_check_manager_oup_ready_and_checkout_queue_ready[core][cluster])
+            );
 
-        always_comb begin : connect_demux_ready_and_checkout_queue_ready_signals
-            for ( int cluster = 0; cluster < NUM_CLUSTERS_PER_CHIPLET; cluster = cluster + 1) begin 
-                demux_ready_and_checkout_queue_oup_ready[core][cluster] = ready_queue_filter_inp_ready[core][cluster] && !checkout_queue_full[core][cluster];
-            end
+            // A disabled dependency check bypasses the matrix.  Otherwise this
+            // queue addresses exactly one matrix row, so no cluster demux remains.
+            stream_filter i_stream_filter_dep_check_en_to_dep_matrix (
+                .valid_i ( dep_check_manager_oup_dep_check_valid[core][cluster] ),
+                .ready_o ( dep_check_manager_oup_dep_check_ready[core][cluster] ),
+                .drop_i  ( !waiting_dep_check_task_desc[core][cluster].dep_check_info.dep_check_en ),
+                .valid_o ( dep_check_valid[cluster][core]                       ),
+                .ready_i ( dep_check_result[cluster][core]                      )
+            );
+            assign dep_check_code[cluster][core] =
+                waiting_dep_check_task_desc[core][cluster].dep_check_info.dep_check_code;
+            assign dep_check_tag[cluster][core] =
+                waiting_dep_check_task_desc[core][cluster].dep_check_info.dep_check_tag;
+
+            // Dummy check tasks only consume their matrix token.  Every other
+            // task advances atomically into this resource's ready/checkout pair.
+            stream_filter i_stream_filter_dummy_check_task_to_ready_and_checkout_queue (
+                .valid_i ( dep_check_manager_oup_ready_and_checkout_queue_valid[core][cluster] ),
+                .ready_o ( dep_check_manager_oup_ready_and_checkout_queue_ready[core][cluster] ),
+                .drop_i  ( (waiting_dep_check_task_desc[core][cluster].task_type == 2'b01) &&
+                            waiting_dep_check_task_desc[core][cluster].dep_check_info.dep_check_en ),
+                .valid_o ( issue_ready_and_checkout_valid[core][cluster] ),
+                .ready_i ( issue_ready_and_checkout_ready[core][cluster] )
+            );
+            assign issue_ready_and_checkout_ready[core][cluster] =
+                ready_queue_filter_inp_ready[core][cluster] &&
+                !checkout_queue_full[core][cluster];
+            assign ready_queue_filter_inp_valid[core][cluster] =
+                issue_ready_and_checkout_valid[core][cluster];
         end
     end
 
@@ -781,17 +758,6 @@ module bingo_hw_manager_top #(
             .dep_set_code_i    (dep_set_code[cluster]    ),
             .dep_set_tag_i     (dep_set_tag[cluster]     )
         );
-    end
-
-    always_comb begin : connect_dep_check_for_dep_matrix
-        for ( int cluster = 0; cluster < NUM_CLUSTERS_PER_CHIPLET; cluster = cluster + 1) begin
-            for ( int core = 0; core < NUM_CORES_PER_CLUSTER; core = core + 1) begin
-                dep_check_valid[cluster][core] = demux_dep_matrix_oup_valid[core][cluster];
-                demux_dep_matrix_oup_ready[core][cluster] = dep_check_result[cluster][core];
-                dep_check_code[cluster][core] = waiting_dep_check_task_desc[core].dep_check_info.dep_check_code;
-                dep_check_tag[cluster][core] = waiting_dep_check_task_desc[core].dep_check_info.dep_check_tag;
-            end
-        end
     end
 
     //////////////////////////////////////////////////////////////////////
@@ -897,15 +863,14 @@ module bingo_hw_manager_top #(
                 .valid_o (   ready_queue_filter_oup_valid[core][cluster]       ),
                 .ready_i (   ready_queue_filter_oup_ready[core][cluster]       )
             );
-            assign ready_queue_filter_inp_valid[core][cluster] = demux_ready_and_checkout_queue_oup_valid[core][cluster];
             // Drop the dummy set tasks
             // Drop from ready queue if:
             // 1. Dummy set task (task_type==01, dep_set_en==1) — existing behavior
             // 2. DARTS CERF: conditionally skipped task — skip execution but propagate deps
             assign ready_queue_filter_drop[core][cluster] =
-                ((waiting_dep_check_task_desc[core].task_type == 2'b01) &&
-                 (waiting_dep_check_task_desc[core].dep_set_info.dep_set_en == 1'b1)) ||
-                cond_exec_skip[core];
+                ((waiting_dep_check_task_desc[core][cluster].task_type == 2'b01) &&
+                 (waiting_dep_check_task_desc[core][cluster].dep_set_info.dep_set_en == 1'b1)) ||
+                cond_exec_skip[core][cluster];
             assign ready_queue_filter_oup_ready[core][cluster] = ~ready_queue_full[core][cluster];
             if (READY_AND_DONE_QUEUE_INTERFACE_TYPE==0) begin: gen_ready_queue_axi_lite_mailbox                               
                 bingo_hw_manager_read_mailbox #(
@@ -964,7 +929,8 @@ module bingo_hw_manager_top #(
             end
             assign ready_queue_base_addr[core][cluster] = ready_queue_base_addr_i +
                                                         (core + cluster * NUM_CORES_PER_CLUSTER) * ReadyQueueAddrOffset;
-            assign ready_queue_data_in[core][cluster].task_id = waiting_dep_check_task_desc[core].task_id;
+            assign ready_queue_data_in[core][cluster].task_id =
+                waiting_dep_check_task_desc[core][cluster].task_id;
             assign ready_queue_data_in[core][cluster].reserved_bits = '0;
             assign ready_queue_push[core][cluster] = ready_queue_filter_oup_valid[core][cluster] & ~ready_queue_full[core][cluster];
         end
@@ -1000,12 +966,15 @@ module bingo_hw_manager_top #(
             // DARTS CERF: if task is conditionally skipped, mark as dummy (2'b01)
             // so checkout logic fires dep_set without done_queue match
             always_comb begin
-                checkout_queue_data_in[core][cluster] = waiting_dep_check_task_desc[core];
-                if (cond_exec_skip[core]) begin
+                checkout_queue_data_in[core][cluster] =
+                    waiting_dep_check_task_desc[core][cluster];
+                if (cond_exec_skip[core][cluster]) begin
                     checkout_queue_data_in[core][cluster].task_type = 2'b01;
                 end
             end
-            assign checkout_queue_push[core][cluster] = demux_ready_and_checkout_queue_oup_valid[core][cluster] && !checkout_queue_full[core][cluster];
+            assign checkout_queue_push[core][cluster] =
+                issue_ready_and_checkout_valid[core][cluster] &&
+                !checkout_queue_full[core][cluster];
             assign checkout_queue_pop[core][cluster] = stream_demux_checkout_queue_chiplet_dep_set_inp_ready[core][cluster] && !checkout_queue_empty[core][cluster];
 
             stream_demux #(

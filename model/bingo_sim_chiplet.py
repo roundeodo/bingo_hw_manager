@@ -90,15 +90,19 @@ class ChipletModel:
         # Task queue (from host)
         self.task_queue = FifoQueue("task_q", 32)
 
-        # Per-core waiting dep check queues
-        self.waiting_queues: list[FifoQueue] = [
-            FifoQueue(f"wait_co{c}", waiting_queue_depth)
-            for c in range(num_cores)
+        # Per-(core, cluster) waiting dep check queues.  The RTL routes by
+        # physical execution resource so a blocked dependency on one cluster
+        # cannot stall the same core number on another cluster.
+        self.waiting_queues: list[list[FifoQueue]] = [
+            [FifoQueue(f"wait_co{co}_cl{cl}", waiting_queue_depth)
+             for cl in range(num_clusters)]
+            for co in range(num_cores)
         ]
 
-        # Per-core dep_check_manager FSM state
-        self.dep_check_fsm: list[DepCheckState] = [
-            DepCheckState.IDLE for _ in range(num_cores)
+        # One dep_check_manager FSM per physical execution resource.
+        self.dep_check_fsm: list[list[DepCheckState]] = [
+            [DepCheckState.IDLE for _ in range(num_clusters)]
+            for _ in range(num_cores)
         ]
 
         # Per-cluster dep matrices
@@ -190,12 +194,13 @@ class ChipletModel:
         if not self.task_queue.empty:
             task = self.task_queue.peek()
             core = task.assigned_core_id
-            if not self.waiting_queues[core].full:
+            cluster = task.assigned_cluster_id
+            if not self.waiting_queues[core][cluster].full:
                 self.task_queue.pop()
-                self.waiting_queues[core].push(task)
+                self.waiting_queues[core][cluster].push(task)
 
         # ================================================================
-        # Phase 1b: Per-core dep_check_manager FSM + dep_matrix check
+        # Phase 1b: Per-(core, cluster) dep_check_manager FSM + dep_matrix check
         #
         # RTL behavior: dep_check reads counter_q (registered). If the
         # check passes, the clear is applied at the clock edge TOGETHER
@@ -209,7 +214,8 @@ class ChipletModel:
         # ================================================================
         self._pending_clears = []  # list of (cluster, row, check_code, check_tag)
         for core in range(self.num_cores):
-            events.extend(self._tick_dep_check_manager(core, cycle))
+            for cluster in range(self.num_clusters):
+                events.extend(self._tick_dep_check_manager(core, cluster, cycle))
 
         # ================================================================
         # Phase 1c: Dep matrix set — arbiter grants ONE request per cycle
@@ -231,32 +237,32 @@ class ChipletModel:
 
         return events
 
-    def _tick_dep_check_manager(self, core: int, cycle: int) -> list[SimEvent]:
-        """One FSM step for dep_check_manager[core]. Mirrors the RTL FSM."""
+    def _tick_dep_check_manager(
+        self, core: int, cluster: int, cycle: int
+    ) -> list[SimEvent]:
+        """One FSM step for dep_check_manager[core][cluster]."""
         events = []
-        state = self.dep_check_fsm[core]
-        wq = self.waiting_queues[core]
+        state = self.dep_check_fsm[core][cluster]
+        wq = self.waiting_queues[core][cluster]
 
         if state == DepCheckState.IDLE:
             if not wq.empty:
-                self.dep_check_fsm[core] = DepCheckState.WAIT_DEP_CHECK
+                self.dep_check_fsm[core][cluster] = DepCheckState.WAIT_DEP_CHECK
 
         elif state == DepCheckState.WAIT_DEP_CHECK:
             task = wq.peek()
             # dep_check_ready_i comes from dep_matrix result (or bypass)
             if not task.dep_check_en:
                 # Bypass: dep_check disabled → immediate pass
-                self.dep_check_fsm[core] = DepCheckState.WAIT_QUEUES
+                self.dep_check_fsm[core][cluster] = DepCheckState.WAIT_QUEUES
             else:
-                cluster = task.assigned_cluster_id
                 result = self.dep_matrices[cluster].check_row(
                     core, task.dep_check_code, task.dep_check_tag)
                 if result:
-                    self.dep_check_fsm[core] = DepCheckState.WAIT_QUEUES
+                    self.dep_check_fsm[core][cluster] = DepCheckState.WAIT_QUEUES
 
         elif state == DepCheckState.WAIT_QUEUES:
             task = wq.peek()
-            cluster = task.assigned_cluster_id
             # Check if ready_queue and checkout_queue can accept
             # Dummy check tasks (task_type=1, dep_check_en=1) bypass ready queue
             is_dummy_check = (task.task_type == 1 and task.dep_check_en)
@@ -268,11 +274,10 @@ class ChipletModel:
             checkout_ok = not self.checkout_queues[core][cluster].full
 
             if ready_ok and checkout_ok:
-                self.dep_check_fsm[core] = DepCheckState.FINISH
+                self.dep_check_fsm[core][cluster] = DepCheckState.FINISH
 
         elif state == DepCheckState.FINISH:
             task = wq.peek()
-            cluster = task.assigned_cluster_id
 
             # DEFER dep_matrix clear — will be applied after dep_set in tick()
             if task.dep_check_en:
@@ -316,7 +321,7 @@ class ChipletModel:
                 task_id=task.task_id,
             ))
 
-            self.dep_check_fsm[core] = DepCheckState.IDLE
+            self.dep_check_fsm[core][cluster] = DepCheckState.IDLE
 
         return events
 
@@ -555,8 +560,9 @@ class ChipletModel:
         if not self.task_queue.empty:
             return False
         for co in range(self.num_cores):
-            if not self.waiting_queues[co].empty:
-                return False
+            for cl in range(self.num_clusters):
+                if not self.waiting_queues[co][cl].empty:
+                    return False
         for cl in range(self.num_clusters):
             for co in range(self.num_cores):
                 if self.core_busy[cl][co]:
@@ -584,10 +590,9 @@ class ChipletModel:
         if not self.chiplet_done_queue.empty:
             lines.append(f"  H2H done queue: {list(self.chiplet_done_queue.items)}")
         for co in range(self.num_cores):
-            wq = self.waiting_queues[co]
-            fsm = self.dep_check_fsm[co].name
-            lines.append(f"  Core {co}: waiting={wq.count}/{wq.depth} fsm={fsm}")
             for cl in range(self.num_clusters):
+                wq = self.waiting_queues[co][cl]
+                fsm = self.dep_check_fsm[co][cl].name
                 rq = self.ready_queues[co][cl]
                 cq = self.checkout_queues[co][cl]
                 busy = self.core_busy[cl][co]
@@ -597,6 +602,9 @@ class ChipletModel:
                     ty = "dummy_set" if (t.task_type == 1 and t.dep_set_en) else \
                          "dummy_chk" if t.task_type == 1 else "normal"
                     cq_head = f" [head:t{t.task_id} {ty}]"
-                lines.append(f"    Cl{cl}: rdy={rq.count} ckout={cq.count}{cq_head}"
-                             f" busy={busy}")
+                lines.append(
+                    f"  Core {co} Cl{cl}: waiting={wq.count}/{wq.depth} "
+                    f"fsm={fsm} rdy={rq.count} ckout={cq.count}{cq_head} "
+                    f"busy={busy}"
+                )
         return "\n".join(lines)

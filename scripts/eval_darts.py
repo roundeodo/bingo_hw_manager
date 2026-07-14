@@ -103,7 +103,7 @@ def dfg_to_task_descriptors(dfg, work_delays=None, active_nodes=None):
 
     for chip_id in all_chiplets:
         per_chiplet[chip_id] = []
-        ordered = dfg._core_balanced_topological_sort(chip_id)
+        ordered = dfg._resource_balanced_topological_sort(chip_id)
         for node in ordered:
             type_map = {"dummy": 1, "gating": 2}
             tt = type_map.get(node.node_type, 0)
