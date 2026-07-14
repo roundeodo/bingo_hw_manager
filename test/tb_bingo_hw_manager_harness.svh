@@ -727,6 +727,7 @@ logic [7:0] dep_counter_state [NUM_CHIPLET][NUM_CLUSTERS_PER_CHIPLET][NUM_CORES_
 logic [NUM_CORES_PER_CLUSTER-1:0][NUM_CLUSTERS_PER_CHIPLET-1:0] waiting_empty_export [NUM_CHIPLET];
 logic [NUM_CORES_PER_CLUSTER-1:0][NUM_CLUSTERS_PER_CHIPLET-1:0] ready_empty_export [NUM_CHIPLET];
 logic [NUM_CORES_PER_CLUSTER-1:0][NUM_CLUSTERS_PER_CHIPLET-1:0] checkout_empty_export [NUM_CHIPLET];
+logic [NUM_CORES_PER_CLUSTER-1:0][NUM_CLUSTERS_PER_CHIPLET-1:0] done_empty_export [NUM_CHIPLET];
 
 for (genvar gi = 0; gi < NUM_CHIPLET; gi++) begin : gen_sig_export
     for (genvar gj = 0; gj < NUM_CLUSTERS_PER_CHIPLET; gj++) begin : gen_cl_export
@@ -742,6 +743,7 @@ for (genvar gi = 0; gi < NUM_CHIPLET; gi++) begin : gen_sig_export
     assign waiting_empty_export[gi] = gen_dut[gi].i_dut.waiting_dep_check_queue_empty;
     assign ready_empty_export[gi]   = gen_dut[gi].i_dut.ready_queue_empty;
     assign checkout_empty_export[gi] = gen_dut[gi].i_dut.checkout_queue_empty;
+    assign done_empty_export[gi] = gen_dut[gi].i_dut.done_q_empty;
 end
 
 // ---------------------------------------------------------------------------
@@ -770,12 +772,13 @@ task automatic dump_queue_state();
         $display("  Chiplet %0d:", chip);
         for (int core = 0; core < NUM_CORES_PER_CLUSTER; core++) begin
             for (int cl = 0; cl < NUM_CLUSTERS_PER_CHIPLET; cl++) begin
-                $display("    Core %0d, Cluster %0d: waiting_dep_check = %s, ready_q = %s, checkout_q = %s",
+                $display("    Core %0d, Cluster %0d: waiting_dep_check = %s, ready_q = %s, checkout_q = %s, done_q = %s",
                     core,
                     cl,
                     waiting_empty_export[chip][core][cl] ? "EMPTY" : "HAS_TASKS",
                     ready_empty_export[chip][core][cl] ? "EMPTY" : "HAS_TASKS",
-                    checkout_empty_export[chip][core][cl] ? "EMPTY" : "HAS_TASKS");
+                    checkout_empty_export[chip][core][cl] ? "EMPTY" : "HAS_TASKS",
+                    done_empty_export[chip][core][cl] ? "EMPTY" : "HAS_TASKS");
             end
         end
     end
@@ -829,6 +832,21 @@ end
 initial begin : completion_monitor
     wait (completed_task_count == EXPECTED_TASK_COUNT);
     repeat (50) @(posedge clk_i);
+    for (int chip = 0; chip < NUM_CHIPLET; chip++) begin
+        for (int core = 0; core < NUM_CORES_PER_CLUSTER; core++) begin
+            for (int cl = 0; cl < NUM_CLUSTERS_PER_CHIPLET; cl++) begin
+                if (!waiting_empty_export[chip][core][cl] ||
+                    !ready_empty_export[chip][core][cl] ||
+                    !checkout_empty_export[chip][core][cl] ||
+                    !done_empty_export[chip][core][cl]) begin
+                    dump_queue_state();
+                    $fatal(1,
+                        "Queues did not drain on chiplet %0d cluster %0d core %0d",
+                        chip, cl, core);
+                end
+            end
+        end
+    end
     $display("");
     $display("+===============================================+");
     $display("|           SIMULATION PASSED                   |");

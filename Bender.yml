@@ -46,6 +46,7 @@ sources:
       - test/tb_bingo_hw_manager_tagged.sv      # identity-aware deps end-to-end
       - test/tb_bingo_hw_manager_tagged_mc.sv   # identity-aware deps, MULTI-CLUSTER cross-cluster aliasing
       - test/tb_bingo_hw_manager_waiting_mc.sv  # per-(core, cluster) waiting queues avoid cross-cluster HOL
+      - test/tb_bingo_hw_manager_no_dep_set_stress.sv # completion and checkout retire atomically
 
   # NOTE: Generated test files in test/generated/ are NOT listed here.
   # They are picked up automatically by compile_vsim.sh via shell glob.

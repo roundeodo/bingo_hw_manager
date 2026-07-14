@@ -407,6 +407,8 @@ module bingo_hw_manager_top #(
     logic                          [NUM_CORES_PER_CLUSTER-1:0][NUM_CLUSTERS_PER_CHIPLET-1:0] checkout_queue_pop;
     logic                          [NUM_CORES_PER_CLUSTER-1:0][NUM_CLUSTERS_PER_CHIPLET-1:0] checkout_queue_full;
     logic                          [NUM_CORES_PER_CLUSTER-1:0][NUM_CLUSTERS_PER_CHIPLET-1:0] checkout_queue_empty;
+    logic                          [NUM_CORES_PER_CLUSTER-1:0][NUM_CLUSTERS_PER_CHIPLET-1:0] checkout_queue_requires_done;
+    logic                          [NUM_CORES_PER_CLUSTER-1:0][NUM_CLUSTERS_PER_CHIPLET-1:0] checkout_queue_done_match;
 
     ///////////////////////////////////////////
     // Stream Demux Checkout Queue Chiplet Set
@@ -786,13 +788,10 @@ module bingo_hw_manager_top #(
                     stream_arbiter_dep_matrix_set_inp_data[stream_arbiter_inp_idx].dep_matrix_col= core;
                     stream_arbiter_dep_matrix_set_inp_data[stream_arbiter_inp_idx].dep_matrix_set_tag = checkout_queue_data_out[core][cluster].dep_set_info.dep_set_tag;
                     stream_arbiter_dep_matrix_set_inp_data[stream_arbiter_inp_idx].dep_set_code  = checkout_queue_data_out[core][cluster].dep_set_info.dep_set_code;
-                    // Handshake from the checkout demux and the per-(core,cluster) done queue
-                    // Dummy set: no done queue check needed
-                    // Normal: per-(core,cluster) done queue must be non-empty
-                    stream_arbiter_dep_matrix_set_inp_valid[stream_arbiter_inp_idx] = (checkout_queue_data_out[core][cluster].task_type == 2'b01) ?
-                                                                                      stream_filter_checkout_queue_dep_set_enable_oup_valid[core][cluster] :
-                                                                                      ((stream_filter_checkout_queue_dep_set_enable_oup_valid[core][cluster]) &&
-                                                                                       (!done_q_empty[core][cluster]));
+                    // Normal tasks are already gated by their matching completion
+                    // before entering the local/remote dep-set demux.
+                    stream_arbiter_dep_matrix_set_inp_valid[stream_arbiter_inp_idx] =
+                        stream_filter_checkout_queue_dep_set_enable_oup_valid[core][cluster];
             end
         end
         // For Chiplet Set Queue
@@ -975,7 +974,22 @@ module bingo_hw_manager_top #(
             assign checkout_queue_push[core][cluster] =
                 issue_ready_and_checkout_valid[core][cluster] &&
                 !checkout_queue_full[core][cluster];
-            assign checkout_queue_pop[core][cluster] = stream_demux_checkout_queue_chiplet_dep_set_inp_ready[core][cluster] && !checkout_queue_empty[core][cluster];
+            // Dummy synchronization tasks do not execute. Every other task may
+            // leave checkout only after the completion for the same task ID has
+            // reached this physical resource's done queue.
+            assign checkout_queue_requires_done[core][cluster] =
+                checkout_queue_data_out[core][cluster].task_type != 2'b01;
+            assign checkout_queue_done_match[core][cluster] =
+                !done_q_empty[core][cluster] &&
+                (done_q_info[core][cluster].task_id ==
+                 checkout_queue_data_out[core][cluster].task_id);
+            assign stream_demux_checkout_queue_chiplet_dep_set_inp_valid[core][cluster] =
+                !checkout_queue_empty[core][cluster] &&
+                (!checkout_queue_requires_done[core][cluster] ||
+                 checkout_queue_done_match[core][cluster]);
+            assign checkout_queue_pop[core][cluster] =
+                stream_demux_checkout_queue_chiplet_dep_set_inp_valid[core][cluster] &&
+                stream_demux_checkout_queue_chiplet_dep_set_inp_ready[core][cluster];
 
             stream_demux #(
                 .N_OUP ( 2 )
@@ -987,8 +1001,8 @@ module bingo_hw_manager_top #(
                 .oup_ready_i ( stream_demux_checkout_queue_chiplet_dep_set_oup_ready[core][cluster]    )
             );
 
-            assign stream_demux_checkout_queue_chiplet_dep_set_inp_valid[core][cluster] = !checkout_queue_empty[core][cluster];
-            assign stream_demux_checkout_queue_chiplet_dep_set_oup_sel[core][cluster] = 
+            assign stream_demux_checkout_queue_chiplet_dep_set_oup_sel[core][cluster] =
+                checkout_queue_data_out[core][cluster].dep_set_info.dep_set_en &&
                 (checkout_queue_data_out[core][cluster].dep_set_info.dep_set_chiplet_id != chip_id_i);
             // To Chiplet Dep Set
             assign stream_demux_checkout_queue_chiplet_dep_set_oup_ready[core][cluster][1] = stream_arbiter_chiplet_dep_set_inp_ready[core + cluster * NUM_CORES_PER_CLUSTER];
@@ -1003,10 +1017,10 @@ module bingo_hw_manager_top #(
                 .ready_i ( stream_filter_checkout_queue_dep_set_enable_oup_ready[core][cluster]    )
             );
             assign stream_filter_checkout_queue_dep_set_enable_inp_valid[core][cluster] = stream_demux_checkout_queue_chiplet_dep_set_oup_valid[core][cluster][0];
-            // Only drop the signal when dep set is disabled and the per-(core,cluster) done queue is non-empty
+            // A task without an outgoing dependency only retires its checkout
+            // and matching done entry; it emits no dependency-set transaction.
             assign stream_filter_checkout_queue_dep_set_enable_drop[core][cluster] =
-                (checkout_queue_data_out[core][cluster].dep_set_info.dep_set_en == 1'b0) &&
-                (!done_q_empty[core][cluster]);
+                !checkout_queue_data_out[core][cluster].dep_set_info.dep_set_en;
             assign stream_filter_checkout_queue_dep_set_enable_oup_ready[core][cluster] = stream_arbiter_dep_matrix_set_inp_ready[core + cluster * NUM_CORES_PER_CLUSTER];
 
         end
@@ -1092,16 +1106,14 @@ module bingo_hw_manager_top #(
     end
 
     // Per-(core, cluster) done queue pop logic:
-    // Pop when the checkout queue head for this (core, cluster) is a normal task
-    // AND the arbiter accepted the dep_set. No cross-core or cross-cluster blocking.
+    // A normal task's checkout and done records are one transaction: either
+    // both retire in the same cycle, or neither retires.
     always_comb begin
         for (int core = 0; core < NUM_CORES_PER_CLUSTER; core++) begin
             for (int cluster = 0; cluster < NUM_CLUSTERS_PER_CHIPLET; cluster++) begin
-                // Normal (2'b00) and gating (2'b10) tasks need done_queue match
-                done_q_pop[core][cluster] = !done_q_empty[core][cluster] &&
-                    (checkout_queue_data_out[core][cluster].task_type == 2'b00 ||
-                     checkout_queue_data_out[core][cluster].task_type == 2'b10) &&
-                    stream_arbiter_dep_matrix_set_inp_ready[core + cluster * NUM_CORES_PER_CLUSTER];
+                done_q_pop[core][cluster] =
+                    checkout_queue_requires_done[core][cluster] &&
+                    checkout_queue_pop[core][cluster];
             end
         end
     end
