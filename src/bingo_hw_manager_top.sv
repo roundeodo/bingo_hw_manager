@@ -44,7 +44,11 @@ module bingo_hw_manager_top #(
     parameter int unsigned DoneQueueDepth = 32,
     parameter int unsigned CheckoutQueueDepth = 8,
     parameter int unsigned ReadyQueueDepth = 8,
-    parameter int unsigned WaitingQueueDepth = 8,
+    // Keep task ingress from stalling globally when one long-running resource
+    // accumulates descriptors.  The task queue has a single head, so a full
+    // per-resource waiting FIFO otherwise blocks descriptors for every other
+    // independent (cluster, core) pair.
+    parameter int unsigned WaitingQueueDepth = 64,
     // Address Offsets
     parameter int unsigned ReadyQueueAddrOffset = 4096,
     // Dependent parameters, DO NOT OVERRIDE!
