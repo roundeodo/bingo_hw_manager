@@ -90,10 +90,10 @@ module bingo_hw_manager_dep_matrix #(
         end
     end
 
-    // Sequential update: apply sets, then clear the drained (r,c,tag) slots.
-    // A set and a clear in the same cycle target DIFFERENT tag slots (a tag's
-    // clear follows a check that read the registered set a cycle earlier), so
-    // they never conflict.
+    // Sequential update.  A consumed tag may be reused immediately for the
+    // next edge in the same cell.  In that case the clear retires the old
+    // token and the simultaneous set installs the replacement token, so set
+    // must win over clear.
     always_ff @(posedge clk_i or negedge rst_ni) begin
         if (!rst_ni) begin
             for (int r = 0; r < DEP_MATRIX_ROWS; r++) begin
@@ -108,7 +108,9 @@ module bingo_hw_manager_dep_matrix #(
                 for (int c = 0; c < DEP_MATRIX_COLS; c++) begin
                     for (int t = 0; t < NumTags; t++) begin
                         if (dep_matrix_clear_row[r] && dep_check_code_i[r][c]
-                            && (t == dep_check_tag_i[r])) begin
+                            && (t == dep_check_tag_i[r])
+                            && !(dep_set_valid_i[c] && dep_set_code_i[c][r]
+                                 && (dep_set_tag_i[c] == dep_check_tag_i[r]))) begin
                             sb_q[r][c][t] <= 1'b0;
                         end else begin
                             sb_q[r][c][t] <= sb_d[r][c][t];

@@ -88,6 +88,20 @@ module tb_bingo_hw_manager_dep_matrix();
         t_peek(0, 4'b0010, 3'd1, res); expect_eq(res, 1'b0, "tag1 drained");
         t_peek(0, 4'b0010, 3'd2, res); expect_eq(res, 1'b1, "tag2 untouched");
 
+        $display("--- same-cycle consume and tag reuse preserves the new token ---");
+        t_set(3, 4'b0100, 3'd5);                             // row2,col3 tag5
+        @(negedge clk_i);
+        t_check_valid = '0; t_check_valid[2] = 1'b1;
+        t_check_code[2] = 4'b1000; t_check_tag[2] = 3'd5;
+        t_set_valid = '0; t_set_valid[3] = 1'b1;
+        t_set_code[3] = 4'b0100; t_set_tag[3] = 3'd5;
+        #1; expect_eq(t_check_result[2], 1'b1, "old row2 col3 tag5 is consumable");
+        @(posedge clk_i); @(negedge clk_i);
+        t_check_valid = '0; t_check_code[2] = '0;
+        t_set_valid = '0; t_set_code[3] = '0;
+        t_peek(2, 4'b1000, 3'd5, res);
+        expect_eq(res, 1'b1, "same-cycle replacement tag5 remains present");
+
         if (errors == 0) $display("All dep_matrix tests passed");
         else             $error("%0d dep_matrix test(s) FAILED", errors);
         #10 $finish;

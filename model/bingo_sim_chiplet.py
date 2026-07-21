@@ -202,15 +202,10 @@ class ChipletModel:
         # ================================================================
         # Phase 1b: Per-(core, cluster) dep_check_manager FSM + dep_matrix check
         #
-        # RTL behavior: dep_check reads counter_q (registered). If the
-        # check passes, the clear is applied at the clock edge TOGETHER
-        # with any dep_set increment. Specifically:
-        #   counter_q <= counter_d - (clear ? 1 : 0)
-        # where counter_d = counter_q + (set ? 1 : 0).
-        #
-        # To model this correctly, we DEFER the clear and apply it after
-        # dep_set in Phase 1c, so set and clear interact correctly:
-        #   set + clear in same cycle → cancel (counter unchanged)
+        # RTL behavior: dep_check reads the registered scoreboard. If a check
+        # passes, its clear and any dep_set update commit at the same edge.
+        # A set reusing the consumed (row, col, tag) is the next dependency
+        # token, so it must remain present after that edge.
         # ================================================================
         self._pending_clears = []  # list of (cluster, row, check_code, check_tag)
         for core in range(self.num_cores):
@@ -218,17 +213,16 @@ class ChipletModel:
                 events.extend(self._tick_dep_check_manager(core, cluster, cycle))
 
         # ================================================================
-        # Phase 1c: Dep matrix set — arbiter grants ONE request per cycle
-        # ================================================================
-        events.extend(self._tick_dep_matrix_set(cycle))
-
-        # ================================================================
-        # Phase 1c.5: Apply deferred dep_check clears
-        # This models the RTL's sequential update where set and clear
-        # happen simultaneously at the clock edge.
+        # Phase 1c: Apply deferred clears before the new set. This gives the
+        # replacement set priority when clear and set target the same tag.
         # ================================================================
         for cluster, row, check_code, check_tag in self._pending_clears:
             self.dep_matrices[cluster].clear_row(row, check_code, check_tag)
+
+        # ================================================================
+        # Phase 1c.5: Dep matrix set — arbiter grants ONE request per cycle
+        # ================================================================
+        events.extend(self._tick_dep_matrix_set(cycle))
 
         # ================================================================
         # Phase 1d: Core execution — dispatch from ready queue + countdown
